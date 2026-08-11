@@ -59,9 +59,12 @@ def _looks_like_number_mark(text: str) -> bool:
     t = (text or "").strip()
     if not t or len(t) > 40:
         return False
-    # 单独 Ø/° 等：保留，后续与邻近数字框合并
-    from pipeline.dimension_parse import is_dim_symbol_only
+    from pipeline.dimension_parse import has_non_dimension_word_prefix, is_dim_symbol_only
 
+    # Max.3 / TYP 等：直接排除，不进尺寸候选
+    if has_non_dimension_word_prefix(t):
+        return False
+    # 单独 Ø/° 等：保留，后续与邻近数字框合并
     if is_dim_symbol_only(t):
         return True
     if _MOSTLY_SYMBOL.match(t):
@@ -90,7 +93,7 @@ def _looks_like_number_mark(text: str) -> bool:
 def _merge_symbol_number_boxes(
     instances: list[dict[str, Any]],
     *,
-    gap_ratio: float = 1.8,
+    gap_ratio: float = 2.8,
 ) -> list[dict[str, Any]]:
     """把单独符号框（Ø/°）与邻近数字框合并，避免直径/角度因符号漏检被拆丢。"""
     from pipeline.dimension_parse import is_dim_symbol_only, normalize_ocr_dimension_text
@@ -141,7 +144,19 @@ def _merge_symbol_number_boxes(
             ox, oy = _center(ob)
             dist = ((sx - ox) ** 2 + (sy - oy) ** 2) ** 0.5
             gap = gap_ratio * max(_side(sb), _side(ob))
-            if dist > gap:
+            # 也允许轴对齐邻近（符号贴在数字左侧/右侧/上下）
+            axis_near = (
+                abs(sx - ox) <= gap and abs(sy - oy) <= gap
+            ) or (
+                abs(sy - oy) <= 0.85 * max(_side(sb), _side(ob))
+                and (
+                    abs(sb[2] - ob[0]) <= gap
+                    or abs(ob[2] - sb[0]) <= gap
+                    or abs(sb[3] - ob[1]) <= gap
+                    or abs(ob[3] - sb[1]) <= gap
+                )
+            )
+            if dist > gap and not axis_near:
                 continue
             if dist < best_dist:
                 best_dist = dist
@@ -151,11 +166,11 @@ def _merge_symbol_number_boxes(
         other = next(o for j, o in others if j == best_j)
         ob = list(other["bbox"])
         ot = str(other.get("raw_text") or (other.get("fields") or {}).get("text") or "").strip()
-        # 符号在左/上 → 前缀；在右/下且为角度符 → 后缀
+        # 符号在左/上 → 前缀；角度符优先作后缀
         sym_left = sx <= (ob[0] + ob[2]) / 2.0
-        is_angle_sym = st in {"°", "º"}
+        is_angle_sym = st in {"°", "º", "˚", "ₒ"}
         if is_angle_sym:
-            combined = f"{ot}{st}" if not sym_left else f"{st}{ot}"
+            combined = f"{ot}°"
         else:
             combined = f"{st}{ot}" if sym_left else f"{ot}{st}"
         combined = normalize_ocr_dimension_text(combined)

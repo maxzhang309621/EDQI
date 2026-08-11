@@ -34,6 +34,11 @@ def test_reject_non_dimension_and_part_no():
     assert not is_valid_dimension_mark({"text": "7295.9", "dim_kind": "length", "basic_size": "7295.9"})
     assert not is_valid_dimension_mark({"text": "(5)", "dim_kind": "length", "basic_size": "5"})
     assert not is_valid_dimension_mark({"text": "+0.2", "dim_kind": "length", "basic_size": "0.2"})
+    assert not is_valid_dimension_mark({"text": "Max. 3", "dim_kind": "length", "basic_size": "3"})
+    assert not is_valid_dimension_mark({"text": "max.3", "dim_kind": "length", "basic_size": "3"})
+    assert not is_valid_dimension_mark({"text": "TYP 5", "dim_kind": "length", "basic_size": "5"})
+    assert not is_valid_dimension_mark({"text": "MIN 0.2", "dim_kind": "length", "basic_size": "0.2"})
+    assert not is_valid_dimension_mark({"text": "5:1", "dim_kind": "length", "basic_size": "5"})
 
 
 def test_reject_wide_bbox():

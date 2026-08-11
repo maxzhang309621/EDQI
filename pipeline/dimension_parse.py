@@ -18,16 +18,38 @@ _PLUS_MINUS = re.compile(r"(?:±|\+/-|/\+-\s*)")
 # 抽取数字（含小数）
 _NUM = re.compile(r"[-+]?\d+(?:[.,]\d+)?")
 
-# 单独检出的直径/角度符号（OCR 常与数字拆成两框）
-_DIM_SYMBOL_ONLY = re.compile(r"^(?:Ø|⌀|Ф|ф|Φ|φ|ø|∅|[OoQqDd]|°|º)$")
+# 单独检出的直径/角度符号（OCR 常与数字拆成两框；含常见误读）
+_DIM_SYMBOL_ONLY = re.compile(
+    r"^(?:Ø|⌀|Ф|ф|Φ|φ|ϕ|ø|∅|˚|°|º|ₒ|[OoQqDd]|¢)$"
+)
+
+# 非尺寸属性词头：Max.3 / TYP 5 / MIN 0.2 等（带数字但不是 Ø/R/长度/角度标注）
+_NON_DIM_WORD_PREFIX = re.compile(
+    r"(?i)^\s*(?:"
+    r"max|min|typ(?:ical)?|ref(?:erence)?|approx(?:\.|imate)?|"
+    r"nom(?:inal)?|basic|see|note|notes?|item|qty|quantity|"
+    r"thru|through|equal|eq\.?|u\.?\s*o\.?\s*s\.?|"
+    r"chamfer|break\s*edge|spot\s*face|drill|tap|deep|thk|thick(?:ness)?"
+    r")\.?\s*"
+)
+
+
+def has_non_dimension_word_prefix(text: str) -> bool:
+    """Max./MIN/TYP 等未定义属性词头（即使后面有数字也应排除）。"""
+    t = (text or "").strip()
+    if not t:
+        return False
+    return bool(_NON_DIM_WORD_PREFIX.match(t))
 
 
 def _normalize_text(text: str) -> str:
     t = (text or "").strip()
     t = t.replace("，", ",").replace("．", ".")
     # 常见直径符号 OCR 归一
-    for ch in ("⌀", "∅", "Ф", "ф", "Φ", "φ", "ø"):
+    for ch in ("⌀", "∅", "Ф", "ф", "Φ", "φ", "ϕ", "ø", "¢"):
         t = t.replace(ch, "Ø")
+    for ch in ("˚", "º", "ₒ"):
+        t = t.replace(ch, "°")
     # OCR 常把 ± 拆成 + / - 或 +-
     t = re.sub(r"\+\s*/\s*-", "±", t)
     t = re.sub(r"\+\s*-\s*", "±", t)
@@ -35,6 +57,8 @@ def _normalize_text(text: str) -> str:
     t = re.sub(r"(?<=\d)[oO](?=\s*[±+\-]|\s*$)", "°", t)
     # O12 / Q12 / D12（紧贴数字）→ Ø12；避免匹配 Rz
     t = re.sub(r"(?i)^([OoQqDd])(?=\s*\d)", "Ø", t)
+    # "o 12" / "O 12" 间距形式
+    t = re.sub(r"(?i)^([OoQqDd])\s+(?=\d)", "Ø", t)
     t = re.sub(r"\s+", " ", t)
     return t.strip()
 
@@ -95,6 +119,9 @@ def parse_dimension_text(text: str) -> dict[str, Any]:
         "has_tolerance": False,
     }
     if not t:
+        return empty
+    # Max.3 / TYP 5 等：不是尺寸标注
+    if has_non_dimension_word_prefix(raw) or has_non_dimension_word_prefix(t):
         return empty
     # 纯符号：无法定尺寸，留给邻近合并 / VLM
     if is_dim_symbol_only(t) or (not re.search(r"\d", t)):
@@ -224,6 +251,12 @@ def is_valid_dimension_mark(
 
     if not text_v or text_v in {".", "——", "-", "–", "—"}:
         return False
+    # Max.3 / MIN / TYP 等未定义属性（即使带数字也排除）
+    if has_non_dimension_word_prefix(text_v):
+        return False
+    # 比例 5:1 等非尺寸
+    if re.fullmatch(r"\d+\s*[:：]\s*\d+", text_v):
+        return False
     # 表面粗糙度 / 视图字母 / 气泡序号 / 残片
     if re.match(r"(?i)^R[azhcf]\d", text_v):
         return False
@@ -234,6 +267,11 @@ def is_valid_dimension_mark(
     if re.fullmatch(r"[+]?\d+\.$", text_v) or re.fullmatch(r"[±+\-]\s*\d+(?:[.,]\d+)?", text_v):
         return False
     if re.search(r"(?i)图中无|无尺寸|not\s*a\s*dim", text_v):
+        return False
+    # 字母+数字但非 R/Ø 尺寸（如 4G、M8x1 以外的杂讯词头已在 prefix 处理）
+    if re.match(r"(?i)^[A-Za-z]{2,}\.?\s*\d", text_v) and not re.match(
+        r"(?i)^(?:Ø|R|M)\s*\d", _normalize_text(text_v)
+    ):
         return False
 
     if require_dim_kind and kind not in _ALLOWED_DIM_KINDS:

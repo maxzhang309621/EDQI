@@ -88,6 +88,13 @@ def test_ocr_symbol_misreads_diameter_and_angle():
     assert parse_dimension_text("30O")["dim_kind"] == "angle"
 
 
+def test_reject_max_min_typ_prefix():
+    assert parse_dimension_text("Max. 3")["dim_kind"] is None
+    assert parse_dimension_text("max.3")["basic_size"] is None
+    assert parse_dimension_text("TYP 5")["dim_kind"] is None
+    assert parse_dimension_text("MIN0.2")["dim_kind"] is None
+
+
 def test_dedupe_prefers_specific_kind():
     from pipeline.dimension_parse import dedupe_dimension_attribute_instances
 
