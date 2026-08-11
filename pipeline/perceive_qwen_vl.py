@@ -1,7 +1,7 @@
 """S4+S5 主路径：Qwen3-VL 定位 + 字段解析。
 
 参考: https://github.com/QwenLM/Qwen3-VL
-权重本地目录默认: models/Qwen3-VL-2B-Instruct
+权重本地目录默认: models/Qwen3-VL-4B-Instruct
 未下载权重时自动回退 mock。
 """
 from __future__ import annotations
