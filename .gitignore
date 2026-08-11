@@ -1,35 +1,82 @@
+# ---- Python / 虚拟环境 ----
 .venv/
+venv/
+env/
 __pycache__/
 *.py[cod]
-.pytest_cache/
-.mypy_cache/
+*$py.class
+*.so
+.Python
 *.egg-info/
+.eggs/
 dist/
 build/
+*.egg
+pip-wheel-metadata/
 
-# 模型权重（体积大，勿提交）
+# ---- 测试 / 类型检查 / 覆盖率 ----
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+coverage.xml
+*.cover
+
+# ---- 模型权重（体积大，勿提交）----
 models/Qwen3-*/
 models/LocateAnything*/
 models/**/*.safetensors
 models/**/*.bin
 models/**/*.pt
+models/**/*.pth
+models/**/*.ckpt
 models/**/*.gguf
+models/**/*.onnx
+models/**/*.engine
+!models/README.md
 
-# 运行产物
-work_dirs/facts/*
-work_dirs/vis/*
-work_dirs/reports/*
-work_dirs/ingest/*
-work_dirs/cache/*
-work_dirs/review_queue/*
+# ---- 运行产物 / 缓存 / 结果 ----
+# 忽略目录内容，保留子目录 .gitkeep 占位
+work_dirs/**
+!work_dirs/**/
 !work_dirs/**/.gitkeep
 
-# 第三方
+# 仅仓库根目录临时调试图（保留 data/、samples/、docs/ 中的图片）
+/*.png
+/*.jpg
+/*.jpeg
+/*.webp
+
+# 常见临时输出
+*.tmp
+*.temp
+*.bak
+*.swp
+*~
+
+# ---- 本地大图纸上传（保留 demo_*.png 等样例）----
+data/input/*.pdf
+data/input/*.PDF
+data/input/test.*
+!data/input/README.md
+!data/input/.gitkeep
+
+# ---- 第三方 ----
 third_party/
 
-# IDE / OS
+# ---- IDE / OS / 日志 ----
 .idea/
 .vscode/
+*.code-workspace
 .DS_Store
 Thumbs.db
+Desktop.ini
 *.log
+logs/
+
+# ---- Cursor / 本地会话（可选）----
+.cursor/
