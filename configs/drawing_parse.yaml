@@ -32,10 +32,16 @@ objects:
     ocr_angle_adapt_max_extra: 4
     ocr_deskew_reread: true
     ocr_deskew_min_angle: 8
-    # backend=ocr 时：用 tables 定位框剔除框内数字；vlm 路径由提示词排除表格区
+    # backend=ocr/vlm：排除表格区域内的尺寸属性
     exclude_table_regions: true
     exclude_table_pad: 2
     exclude_table_expand_up: 0.12
+    # 严格模式：只识别配置 fields 中的尺寸属性，丢弃非尺寸/畸形框
+    strict_fields_only: true
+    require_dim_kind: true
+    require_basic_size: true
+    max_bbox_width_ratio: 0.28
+    max_aspect_ratio: 8.0
     fields:
       - name: text
         parse_hint: 尺寸标注可见原文

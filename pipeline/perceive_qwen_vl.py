@@ -13,10 +13,17 @@ from typing import Any
 from PIL import Image
 
 from pipeline import load_config, model_path_ready, resolve_model_source, resolve_path
-from pipeline.dimension_parse import enrich_dimension_fields_from_text
+from pipeline.dimension_parse import (
+    bbox_geometry_ok,
+    clip_fields_to_schema,
+    enrich_dimension_fields_from_text,
+    is_valid_dimension_mark,
+)
 from pipeline.perceive_common import (
     expand_bbox,
     extract_json_payload_safe,
+    filter_instances_outside_bboxes,
+    is_table_entity_id,
     mock_perceive,
     norm_bbox_to_pixels,
 )
@@ -214,27 +221,126 @@ def _coerce_instance_list(
 
 def _dimension_marks_locate_rules() -> list[str]:
     return [
-        "对于尺寸标注（parse_kind=dimension_marks / number_mark）：",
-        "只定位视图中的尺寸数字与公差标注（含 Ø/⌀/Φ 直径、R 半径、长度、角度°、±公差）。",
-        "禁止定位：标题栏/图框表格文字、图号、材料牌号、BOM、Siemens/版权、比例、页码、"
-        "零件名、表面粗糙度符号旁的非尺寸长串、坐标轴刻度。",
+        "对于尺寸标注（parse_kind=dimension_marks / number_mark）—严格模式：",
+        "只定位视图中的尺寸数字与公差标注（含 Ø/⌀/Φ 直径、R 半径、长度数值、角度°、±公差）。",
+        "bbox 必须紧贴该尺寸文字，禁止拉成横贯半页/整页的细长条。",
+        "禁止定位：标题栏/图框表格、图号、材料牌号、BOM、Siemens/版权、比例、页码、"
+        "零件名、粗糙度代号旁非尺寸串、坐标刻度、网格线、任何非尺寸文本。",
+        "拿不准是否为尺寸标注时宁可漏检，不要输出。",
         "每个独立尺寸标注各一个 bbox；重叠/压盖的尺寸也要分开框。",
     ]
 
 
 def _dimension_marks_pass2_prompt(ent: dict[str, Any]) -> str:
+    allowed = [str(f.get("name")) for f in (ent.get("fields") or []) if f.get("name")]
     field_desc = json_fields(ent)
+    allow_s = ", ".join(allowed) if allowed else "text, dim_kind, basic_size, tolerance, has_tolerance, angle"
     return (
-        "读取该局部图中的工程尺寸标注属性。只输出 JSON。\n"
-        "若裁剪区不是尺寸标注（图号/材料/标题栏等），fields 全部填 null。\n"
-        f"字段: {field_desc}\n"
+        "严格读取该局部图中的工程尺寸标注属性。只输出 JSON。\n"
+        f"fields 只允许这些键（不得增删）: {allow_s}\n"
+        "若不是尺寸标注（图号/材料/标题栏/表格字等），全部字段填 null，raw_text=\"\"。\n"
+        f"字段说明: {field_desc}\n"
         "规则:\n"
-        "- text=可见原文；dim_kind=diameter|radius|length|angle|null；\n"
-        "- basic_size=基本尺寸（±前）；tolerance=公差（±后，无则 null）；\n"
-        "- has_tolerance=是否标明公差（布尔）；\n"
-        "- angle=文本相对水平线朝向角（度，水平≈0，竖排≈90 或 -90）。\n"
-        "禁止编造。格式: {\"fields\":{...},\"raw_text\":\"...\"}"
+        "- dim_kind 只能是 diameter|radius|length|angle，否则 null；\n"
+        "- basic_size=基本尺寸；tolerance=公差（无则 null）；has_tolerance 为布尔；\n"
+        "- angle=相对水平线朝向角（度）；\n"
+        "- 禁止输出未声明字段，禁止编造。\n"
+        "格式: {\"fields\":{...},\"raw_text\":\"...\"}"
     )
+
+
+def _dimension_ent_strict_flags(ent: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "strict": bool(ent.get("strict_fields_only", True)),
+        "require_dim_kind": bool(ent.get("require_dim_kind", True)),
+        "require_basic_size": bool(ent.get("require_basic_size", True)),
+        "exclude_table_regions": bool(ent.get("exclude_table_regions", True)),
+        "max_bbox_width_ratio": float(ent.get("max_bbox_width_ratio", 0.28)),
+        "max_aspect_ratio": float(ent.get("max_aspect_ratio", 8.0)),
+    }
+
+
+def _finalize_dimension_instances(
+    instances: list[dict[str, Any]],
+    plan: list[dict[str, Any]],
+    *,
+    page_w: int,
+    page_h: int,
+    notes: list[str] | None = None,
+) -> list[dict[str, Any]]:
+    """严格按 drawing_parse 配置过滤尺寸属性；非尺寸/畸形框丢弃。"""
+    dim_ents = {e["entity_id"]: e for e in plan if _is_dimension_marks_entity(e)}
+    if not dim_ents:
+        return instances
+
+    table_boxes = [
+        list(inst["bbox"])
+        for inst in instances
+        if isinstance(inst, dict)
+        and inst.get("bbox")
+        and is_table_entity_id(inst.get("entity_id"), parse_kind=inst.get("parse_kind"))
+    ]
+
+    kept: list[dict[str, Any]] = []
+    dropped = 0
+    for inst in instances:
+        if not isinstance(inst, dict):
+            continue
+        eid = inst.get("entity_id")
+        ent = dim_ents.get(eid)
+        if not ent:
+            kept.append(inst)
+            continue
+        flags = _dimension_ent_strict_flags(ent)
+        allowed = [str(f.get("name")) for f in (ent.get("fields") or []) if f.get("name")]
+        fields = dict(inst.get("fields") or {})
+        text_v = str(fields.get("text") or inst.get("raw_text") or "")
+        fields = enrich_dimension_fields_from_text(fields, text_v, bbox=inst.get("bbox"))
+        if flags["strict"]:
+            fields = clip_fields_to_schema(fields, allowed)
+        inst = dict(inst)
+        inst["fields"] = fields
+        if fields.get("text"):
+            inst["raw_text"] = fields.get("text")
+        if fields.get("angle") is not None:
+            inst["angle"] = fields.get("angle")
+
+        if not bbox_geometry_ok(
+            inst.get("bbox"),
+            page_w=page_w,
+            page_h=page_h,
+            max_width_ratio=flags["max_bbox_width_ratio"],
+            max_aspect_ratio=flags["max_aspect_ratio"],
+        ):
+            dropped += 1
+            continue
+        if not is_valid_dimension_mark(
+            fields,
+            text=text_v,
+            require_dim_kind=flags["require_dim_kind"],
+            require_basic_size=flags["require_basic_size"],
+        ):
+            dropped += 1
+            continue
+        kept.append(inst)
+
+    if any(_dimension_ent_strict_flags(e)["exclude_table_regions"] for e in dim_ents.values()):
+        if table_boxes:
+            dim_only = [i for i in kept if i.get("entity_id") in dim_ents]
+            other = [i for i in kept if i.get("entity_id") not in dim_ents]
+            pad = max(
+                (float(e.get("exclude_table_pad", 2.0)) for e in dim_ents.values()),
+                default=2.0,
+            )
+            filtered, n_tab = filter_instances_outside_bboxes(
+                dim_only, table_boxes, pad=pad, entity_ids=None
+            )
+            dropped += n_tab
+            kept = other + filtered
+
+    if notes is not None:
+        notes.append(f"dimension_strict_dropped={dropped}")
+    return kept
 
 
 def _build_plan_prompt(plan: list[dict[str, Any]], *, locate_only: bool = False) -> str:
@@ -703,6 +809,9 @@ def perceive_qwen_vl(
             else:
                 box_inst = {k: v for k, v in box_inst.items() if not str(k).startswith("_")}
             instances.append(box_inst)
+        instances = _finalize_dimension_instances(
+            instances, plan, page_w=width, page_h=height, notes=notes
+        )
         timing = _snapshot_vlm_timing(wall_s=time.perf_counter() - wall_t0)
         print(
             f"[timing] qwen_vl wall={timing['wall_s']:.2f}s "
@@ -766,6 +875,9 @@ def perceive_qwen_vl(
             if str(k).startswith("_"):
                 del inst[k]
         instances[i] = inst
+    instances = _finalize_dimension_instances(
+        instances, plan, page_w=width, page_h=height, notes=notes
+    )
     timing = _snapshot_vlm_timing(wall_s=time.perf_counter() - wall_t0)
     print(
         f"[timing] qwen_vl wall={timing['wall_s']:.2f}s "

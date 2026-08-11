@@ -160,3 +160,88 @@ def enrich_dimension_fields_from_text(
         except (TypeError, ValueError):
             out["angle"] = text_angle_from_bbox(bbox)
     return out
+
+
+_ALLOWED_DIM_KINDS = frozenset({"diameter", "radius", "length", "angle"})
+
+
+def clip_fields_to_schema(
+    fields: dict[str, Any] | None,
+    allowed_names: list[str] | set[str] | frozenset[str] | None,
+) -> dict[str, Any]:
+    """只保留配置中声明的字段名。"""
+    out = dict(fields or {})
+    if not allowed_names:
+        return out
+    allow = set(allowed_names)
+    return {k: v for k, v in out.items() if k in allow}
+
+
+def is_valid_dimension_mark(
+    fields: dict[str, Any] | None,
+    *,
+    text: str | None = None,
+    require_dim_kind: bool = True,
+    require_basic_size: bool = True,
+) -> bool:
+    """是否为配置允许的尺寸属性（非图号/材料等杂讯）。"""
+    f = fields or {}
+    text_v = str(text if text is not None else f.get("text") or "").strip()
+    kind = str(f.get("dim_kind") or "").strip().lower() or None
+    if kind == "null":
+        kind = None
+    basic = f.get("basic_size")
+    if basic is not None:
+        basic = str(basic).strip() or None
+
+    if require_dim_kind and kind not in _ALLOWED_DIM_KINDS:
+        # 尝试从文本再解析一次
+        parsed = parse_dimension_text(text_v)
+        kind = parsed.get("dim_kind")
+        if basic is None:
+            basic = parsed.get("basic_size")
+        if kind not in _ALLOWED_DIM_KINDS:
+            return False
+    if require_basic_size and not basic:
+        parsed = parse_dimension_text(text_v)
+        basic = parsed.get("basic_size")
+        if not basic:
+            return False
+    # 拒绝明显非尺寸长串
+    if len(text_v) > 32:
+        return False
+    if re.search(r"(?i)(?:din\s*en|sheet|cu[\s\-]?etp|siemens|material|article)", text_v):
+        return False
+    if re.match(r"^\d{7,}", text_v) and kind == "length" and "±" not in text_v and "°" not in text_v:
+        return False
+    return True
+
+
+def bbox_geometry_ok(
+    bbox: list[Any] | None,
+    *,
+    page_w: int,
+    page_h: int,
+    max_width_ratio: float = 0.28,
+    max_aspect_ratio: float = 8.0,
+    min_side: float = 4.0,
+) -> bool:
+    """过滤整幅/半幅细长假框。"""
+    if not bbox or len(bbox) != 4:
+        return False
+    try:
+        x1, y1, x2, y2 = [float(v) for v in bbox]
+    except (TypeError, ValueError):
+        return False
+    bw, bh = max(0.0, x2 - x1), max(0.0, y2 - y1)
+    if bw < min_side or bh < min_side:
+        return False
+    pw, ph = max(1, int(page_w)), max(1, int(page_h))
+    if bw > max_width_ratio * pw:
+        return False
+    if bh > 0.35 * ph:
+        return False
+    ar = bw / max(bh, 1.0)
+    if ar > max_aspect_ratio:
+        return False
+    return True
