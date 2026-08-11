@@ -87,7 +87,80 @@ def test_merge_symbol_number_boxes():
     assert "angle" in kinds
 
 
-def test_prescreen_keeps_pairs_and_valid_dims():
+def test_ocr_owned_vs_vlm_symbol_roles():
+    from pipeline.dimension_parse import (
+        is_bare_numeric_dimension_candidate,
+        is_ocr_owned_dim_kind,
+        is_vlm_owned_dim_kind,
+        prescreen_ocr_dimension_candidates,
+        sanitize_number_mark_instances,
+    )
+
+    assert is_ocr_owned_dim_kind("radius")
+    assert is_ocr_owned_dim_kind("length")
+    assert is_vlm_owned_dim_kind("diameter")
+    assert is_vlm_owned_dim_kind("angle")
+    assert is_bare_numeric_dimension_candidate("12.5")
+    assert is_bare_numeric_dimension_candidate("12±0.1")
+    assert not is_bare_numeric_dimension_candidate("R5")
+    assert not is_bare_numeric_dimension_candidate("Ø10")
+
+    instances = [
+        {
+            "entity_id": "number_mark",
+            "bbox": [10, 10, 40, 28],
+            "raw_text": "R5",
+            "fields": {"text": "R5"},
+            "confidence": 0.9,
+        },
+        {
+            "entity_id": "number_mark",
+            "bbox": [50, 10, 90, 28],
+            "raw_text": "12.5",
+            "fields": {"text": "12.5"},
+            "confidence": 0.9,
+        },
+        {
+            "entity_id": "number_mark",
+            "bbox": [100, 10, 140, 28],
+            "raw_text": "Ø10",
+            "fields": {"text": "Ø10"},
+            "confidence": 0.9,
+        },
+    ]
+    cands, _, _ = prescreen_ocr_dimension_candidates(instances, page_w=2048, page_h=1448)
+    roles = {c["raw_text"]: (c["fields"].get("ocr_role"), c["fields"].get("dim_kind")) for c in cands}
+    assert roles["R5"][0] == "ocr_owned"
+    assert roles["12.5"][0] == "ocr_owned"  # 长度归 OCR
+    assert roles["Ø10"][0] == "vlm_symbol"  # 直径必须 VLM 确认
+
+    # 直径未经 VLM 确认 → sanitize 丢弃
+    fake = [
+        {
+            "entity_id": "number_mark",
+            "bbox": [100, 10, 140, 28],
+            "raw_text": "Ø10",
+            "fields": {"text": "Ø10", "dim_kind": "diameter", "basic_size": "10"},
+        },
+        {
+            "entity_id": "number_mark",
+            "bbox": [10, 10, 40, 28],
+            "raw_text": "R5",
+            "fields": {"text": "R5", "dim_kind": "radius", "basic_size": "5", "vlm_filtered": True},
+        },
+    ]
+    out, dropped = sanitize_number_mark_instances(fake, page_w=2048, page_h=1448)
+    texts = [i.get("raw_text") for i in out if i.get("entity_id") == "number_mark"]
+    assert "R5" in texts
+    assert "Ø10" not in texts
+    assert dropped >= 1
+
+
+def test_vertical_bbox_geometry_relaxed():
+    from pipeline.dimension_parse import bbox_geometry_ok
+
+    # 竖排窄高框应通过
+    assert bbox_geometry_ok([100, 100, 130, 220], page_w=2048, page_h=1448)
     instances = apply_dimension_parse_to_instances(
         [
             {

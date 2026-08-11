@@ -1000,10 +1000,18 @@ def perceive_number_overlap(
     min_side = int(overlap_cfg.get("min_box_side", 8))
     min_ink_pixels = float(overlap_cfg.get("min_ink_pixels", 20))
     min_ink_ratio = float(overlap_cfg.get("min_ink_ratio", 0.06))
-    # 重叠检测 OCR：仅用 perception.number_overlap（ocr_angles 等），不改其行为
+    # 重叠检测基础角；属性解析时叠加更密角度以召回倾斜/垂直尺寸
     angles = [float(a) for a in overlap_cfg.get("ocr_angles", [0, 90, -90])]
-    # 尺寸属性专用：自适应角 / deskew；一旦走重叠检测则强制关闭，避免干扰
-    if detect_overlap:
+    if parse_dims:
+        attr_angles = dim_cfg.get("ocr_angles")
+        if not attr_angles:
+            attr_angles = [0, 30, 45, 60, 90, -30, -45, -60, -90]
+        angles = sorted({float(a) for a in list(angles) + list(attr_angles)})
+        # 属性路径即使同时做重叠检测，也启用自适应角 / deskew（否则竖排易漏）
+        angle_adapt = bool(dim_cfg.get("ocr_angle_adapt", True))
+        deskew_reread = bool(dim_cfg.get("ocr_deskew_reread", True))
+        deskew_min_angle = float(dim_cfg.get("ocr_deskew_min_angle", 6.0))
+    elif detect_overlap:
         angle_adapt = False
         deskew_reread = False
         deskew_min_angle = 8.0
@@ -1138,9 +1146,9 @@ def perceive_number_overlap(
         extra_angs = suggest_extra_page_angles(
             (get_instance_angle(i) for i in ocr_insts),
             existing=angles,
-            step=float(dim_cfg.get("ocr_angle_adapt_step", 15)),
-            min_count=int(dim_cfg.get("ocr_angle_adapt_min_count", 2)),
-            max_extra=int(dim_cfg.get("ocr_angle_adapt_max_extra", 4)),
+            step=float(dim_cfg.get("ocr_angle_adapt_step", 10 if parse_dims else 15)),
+            min_count=int(dim_cfg.get("ocr_angle_adapt_min_count", 1 if parse_dims else 2)),
+            max_extra=int(dim_cfg.get("ocr_angle_adapt_max_extra", 8 if parse_dims else 4)),
         )
         for ang in extra_angs:
             more = _ocr_once(
@@ -1208,6 +1216,7 @@ def perceive_number_overlap(
         f"tile_ocr={notes_tile}",
         f"local_ocr={notes_local}",
         f"angle_adapt_extra={adapt_extra}",
+        f"ocr_angles={angles}",
         f"deskew_reread={deskew_hits}",
         f"symbol_merged={sym_merged}",
         f"detect_overlap={detect_overlap}",

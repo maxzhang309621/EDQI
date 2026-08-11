@@ -303,6 +303,7 @@ def perceive(
                 exclude_bboxes=exclude_bbs or None,
                 exclude_pad=float(dim_ent.get("exclude_table_pad", 2.0)),
                 exclude_table_texts=table_tokens or None,
+                ocr_accept_kinds=set(dim_ent.get("ocr_accept_kinds") or ["radius", "length"]),
             )
             ocr_notes.append(
                 f"ocr_dim_prescreen={len(candidates)}/{max(0, len(ocr_instances) - len(keep_pairs))}"
@@ -356,6 +357,7 @@ def perceive(
             exclude_bboxes=exclude_bbs or None,
             exclude_pad=float(dim_cfg.get("exclude_table_pad", 2.0)),
             exclude_table_texts=table_tokens or None,
+            require_vlm_for_kinds=set(dim_cfg.get("vlm_require_kinds") or ["diameter", "angle"]),
         )
         cleaned, n_dedupe = dedupe_dimension_attribute_instances(cleaned)
         merged["instances"] = cleaned

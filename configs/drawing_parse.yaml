@@ -16,7 +16,7 @@ tables_only: false
 # ---------- 非表格：区域/对象 ----------
 # parse_kind=dimension_marks：尺寸标注属性（Ø/R/长度/° + 基本尺寸/公差）
 # backend（默认 ocr_locate_vlm_filter）:
-#   ocr_locate_vlm_filter — OCR 宽召回+规则初筛 → VLM crop 精筛（推荐，利于 4B）
+#   ocr_locate_vlm_filter — OCR 宽召回(radius/length + 倾斜角) → VLM 精筛(重点直径/角度符号)
 #   vlm — VLM 全图定位+字段；ocr — 仅 OCR 规则解析
 objects:
   - enabled: true
@@ -27,13 +27,18 @@ objects:
     cardinality: many
     # false=属性路径不做墨迹重叠配对；规则启用 NUM_TEXT_NO_OVERLAP 时重叠仍走独立 OCR
     detect_overlap: false
-    # OCR 定位/初筛增强（不影响 perception.number_overlap 的重叠检测角度策略）
+    # OCR 定位/初筛增强：密角度 + 自适应，覆盖倾斜/垂直尺寸
     ocr_angle_adapt: true
-    ocr_angle_adapt_step: 15
-    ocr_angle_adapt_min_count: 2
-    ocr_angle_adapt_max_extra: 4
+    ocr_angle_adapt_step: 10
+    ocr_angle_adapt_min_count: 1
+    ocr_angle_adapt_max_extra: 8
     ocr_deskew_reread: true
-    ocr_deskew_min_angle: 8
+    ocr_deskew_min_angle: 6
+    # 属性 OCR 扫描角（与 perception.number_overlap.ocr_angles 合并）
+    ocr_angles: [0, 30, 45, 60, 90, -30, -45, -60, -90]
+    # OCR 采信 radius/length；diameter/angle 必须 VLM 认符号后确认
+    ocr_accept_kinds: [radius, length]
+    vlm_require_kinds: [diameter, angle]
     # 排除表格区域内的尺寸属性
     exclude_table_regions: true
     exclude_table_pad: 2
