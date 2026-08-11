@@ -43,6 +43,50 @@ def test_hybrid_dims_route_to_ocr_not_vl_locate():
     assert {e["entity_id"] for e in vl} >= {"material_table", "main_table"}
 
 
+def test_merge_symbol_number_boxes():
+    from pipeline.dimension_parse import parse_dimension_text
+    from pipeline.perceive_number_overlap import _merge_symbol_number_boxes, _looks_like_number_mark
+
+    assert _looks_like_number_mark("\u00d8")  # Ø alone
+    assert _looks_like_number_mark("\u00b0")  # ° alone
+    insts = [
+        {
+            "entity_id": "number_mark",
+            "bbox": [10, 10, 28, 30],
+            "raw_text": "\u00d8",
+            "fields": {"text": "\u00d8"},
+            "confidence": 0.7,
+        },
+        {
+            "entity_id": "number_mark",
+            "bbox": [30, 10, 70, 30],
+            "raw_text": "12.5",
+            "fields": {"text": "12.5"},
+            "confidence": 0.9,
+        },
+        {
+            "entity_id": "number_mark",
+            "bbox": [100, 10, 140, 30],
+            "raw_text": "45",
+            "fields": {"text": "45"},
+            "confidence": 0.85,
+        },
+        {
+            "entity_id": "number_mark",
+            "bbox": [142, 10, 158, 30],
+            "raw_text": "\u00b0",
+            "fields": {"text": "\u00b0"},
+            "confidence": 0.6,
+        },
+    ]
+    out = _merge_symbol_number_boxes(insts)
+    assert len(out) == 2
+    assert all((i.get("fields") or {}).get("symbol_merged") for i in out)
+    kinds = {parse_dimension_text(str(i.get("raw_text")))["dim_kind"] for i in out}
+    assert "diameter" in kinds
+    assert "angle" in kinds
+
+
 def test_prescreen_keeps_pairs_and_valid_dims():
     instances = apply_dimension_parse_to_instances(
         [

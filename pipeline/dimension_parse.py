@@ -4,26 +4,50 @@ from __future__ import annotations
 import re
 from typing import Any
 
-# 直径前缀（含常见 OCR 变体；不用裸 O/0，避免误伤普通数字）
-_DIAM_PREFIX = re.compile(r"^[\s]*(?:Ø|⌀|Ф|ф|Φ|φ|ø)", re.IGNORECASE)
-# 半径：R/r 后接数字（允许空格）
-_RADIUS_PREFIX = re.compile(r"^[\s]*[Rr](?=[\s]*\d)")
-# 角度后缀
-_ANGLE_SUFFIX = re.compile(r"(?:°|º|deg\.?)\s*$", re.IGNORECASE)
+# 直径前缀（含常见 OCR 变体；O/Q/D 常为 Ø 误读；不用裸 0 开头小数）
+_DIAM_PREFIX = re.compile(
+    r"^[\s]*(?:Ø|⌀|Ф|ф|Φ|φ|ø|∅|[OoQqDd])(?=[\s]*\d)",
+)
+# 半径：R/r 后接数字（允许空格）；排除 Rz/Ra 粗糙度
+_RADIUS_PREFIX = re.compile(r"^[\s]*[Rr](?![\s]*[azhcfAZHCF])(?=[\s]*\d)")
+# 角度后缀（° 常被 OCR 成 o/O）
+_ANGLE_SUFFIX = re.compile(r"(?:°|º|deg\.?|(?<=\d)[oO])\s*$", re.IGNORECASE)
+_ANGLE_INLINE = re.compile(r"(?:°|º|deg\.?|(?<=\d)[oO])(?=\s*[±+\-]|\s*$)", re.IGNORECASE)
 # ± 或 +/-
 _PLUS_MINUS = re.compile(r"(?:±|\+/-|/\+-\s*)")
 # 抽取数字（含小数）
 _NUM = re.compile(r"[-+]?\d+(?:[.,]\d+)?")
 
+# 单独检出的直径/角度符号（OCR 常与数字拆成两框）
+_DIM_SYMBOL_ONLY = re.compile(r"^(?:Ø|⌀|Ф|ф|Φ|φ|ø|∅|[OoQqDd]|°|º)$")
+
 
 def _normalize_text(text: str) -> str:
     t = (text or "").strip()
     t = t.replace("，", ",").replace("．", ".")
+    # 常见直径符号 OCR 归一
+    for ch in ("⌀", "∅", "Ф", "ф", "Φ", "φ", "ø"):
+        t = t.replace(ch, "Ø")
     # OCR 常把 ± 拆成 + / - 或 +-
     t = re.sub(r"\+\s*/\s*-", "±", t)
     t = re.sub(r"\+\s*-\s*", "±", t)
+    # 45o / 45O → 45°（仅数字后的拉丁 o）
+    t = re.sub(r"(?<=\d)[oO](?=\s*[±+\-]|\s*$)", "°", t)
+    # O12 / Q12 / D12（紧贴数字）→ Ø12；避免匹配 Rz
+    t = re.sub(r"(?i)^([OoQqDd])(?=\s*\d)", "Ø", t)
     t = re.sub(r"\s+", " ", t)
     return t.strip()
+
+
+def normalize_ocr_dimension_text(text: str) -> str:
+    """对外暴露的 OCR 尺寸文本归一（符号变体 → 标准 Ø/°/±）。"""
+    return _normalize_text(text)
+
+
+def is_dim_symbol_only(text: str) -> bool:
+    """是否为单独直径/角度符号框（无数字）。"""
+    t = (text or "").strip()
+    return bool(t) and bool(_DIM_SYMBOL_ONLY.match(t))
 
 
 def _normalize_number_token(tok: str) -> str:
@@ -70,16 +94,20 @@ def parse_dimension_text(text: str) -> dict[str, Any]:
         "tolerance": None,
         "has_tolerance": False,
     }
-    if not t or not re.search(r"\d", t):
+    if not t:
+        return empty
+    # 纯符号：无法定尺寸，留给邻近合并 / VLM
+    if is_dim_symbol_only(t) or (not re.search(r"\d", t)):
         return empty
 
     dim_kind: str | None = None
     body = t
 
     # 角度：° 可在数值后、± 前（如 45°±1），不要求整串以 ° 结尾
-    if _ANGLE_SUFFIX.search(body) or re.search(r"(?:°|º|deg\.?)", body, re.IGNORECASE):
+    if _ANGLE_SUFFIX.search(body) or _ANGLE_INLINE.search(body):
         dim_kind = "angle"
-        body = re.sub(r"(?:°|º|deg\.?)", "", body, flags=re.IGNORECASE).strip()
+        body = _ANGLE_INLINE.sub("", body)
+        body = _ANGLE_SUFFIX.sub("", body).strip()
     elif _DIAM_PREFIX.match(body):
         dim_kind = "diameter"
         body = _DIAM_PREFIX.sub("", body, count=1).strip()
@@ -460,3 +488,91 @@ def sanitize_number_mark_instances(
             out["angle"] = fields.get("angle")
         kept.append(out)
     return kept, dropped
+
+
+def _attr_rank(inst: dict[str, Any]) -> tuple:
+    """去重保留优先级：更具体类型 > 带公差 > VLM确认 > 高置信度。"""
+    fields = inst.get("fields") or {}
+    kind = str(fields.get("dim_kind") or "").lower()
+    kind_score = {"diameter": 4, "radius": 4, "angle": 4, "length": 1}.get(kind, 0)
+    has_tol = 1 if fields.get("has_tolerance") or fields.get("tolerance") not in (None, "") else 0
+    vlm = 1 if fields.get("vlm_filtered") else 0
+    conf = float(inst.get("confidence") or 0)
+    text = str(inst.get("raw_text") or fields.get("text") or "")
+    return (kind_score, has_tol, vlm, conf, len(text))
+
+
+def dedupe_dimension_attribute_instances(
+    instances: list[dict[str, Any]],
+    *,
+    iou_thr: float = 0.40,
+    center_dist_ratio: float = 0.75,
+) -> tuple[list[dict[str, Any]], int]:
+    """去掉重复尺寸属性（同位置/同基本尺寸近邻只留一条）。keep_pair / 非 number_mark 不动。"""
+    from pipeline.perceive_utils import iou_xyxy
+
+    mark_ids = {"number_mark", "annotation", "annotations"}
+    others: list[dict[str, Any]] = []
+    attrs: list[dict[str, Any]] = []
+    for inst in instances or []:
+        if not isinstance(inst, dict):
+            continue
+        eid = str(inst.get("entity_id") or "")
+        if eid not in mark_ids or inst.get("keep_pair"):
+            others.append(inst)
+            continue
+        attrs.append(inst)
+
+    attrs_sorted = sorted(attrs, key=_attr_rank, reverse=True)
+    kept_attrs: list[dict[str, Any]] = []
+    dropped = 0
+
+    def _basic(inst: dict[str, Any]) -> str:
+        f = inst.get("fields") or {}
+        b = f.get("basic_size")
+        if b is None or b == "":
+            return ""
+        return str(b).strip().replace(",", ".")
+
+    def _center(b: list[Any]) -> tuple[float, float] | None:
+        if not b or len(b) != 4:
+            return None
+        return ((float(b[0]) + float(b[2])) / 2.0, (float(b[1]) + float(b[3])) / 2.0)
+
+    for cand in attrs_sorted:
+        cb = cand.get("bbox")
+        if not cb:
+            dropped += 1
+            continue
+        cc = _center(cb)
+        cw = max(1.0, float(cb[2]) - float(cb[0]))
+        ch = max(1.0, float(cb[3]) - float(cb[1]))
+        c_basic = _basic(cand)
+        dup = False
+        for s in kept_attrs:
+            sb = s.get("bbox")
+            if not sb:
+                continue
+            if iou_xyxy([float(x) for x in cb], [float(x) for x in sb]) >= iou_thr:
+                dup = True
+                break
+            sc = _center(sb)
+            if cc and sc:
+                dist = ((cc[0] - sc[0]) ** 2 + (cc[1] - sc[1]) ** 2) ** 0.5
+                ref = max(cw, ch, float(sb[2] - sb[0]), float(sb[3] - sb[1]), 8.0)
+                same_basic = bool(c_basic) and c_basic == _basic(s)
+                if same_basic and dist <= center_dist_ratio * ref:
+                    dup = True
+                    break
+                # 文本几乎相同且中心很近
+                ct = str(cand.get("raw_text") or (cand.get("fields") or {}).get("text") or "").strip()
+                st = str(s.get("raw_text") or (s.get("fields") or {}).get("text") or "").strip()
+                if ct and st and ct == st and dist <= center_dist_ratio * ref:
+                    dup = True
+                    break
+        if dup:
+            dropped += 1
+            continue
+        kept_attrs.append(cand)
+
+    return others + kept_attrs, dropped

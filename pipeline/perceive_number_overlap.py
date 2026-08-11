@@ -55,10 +55,15 @@ def _clip_bbox(bbox: list[int], w: int, h: int) -> list[int]:
 
 
 def _looks_like_number_mark(text: str) -> bool:
-    """尺寸/数值候选：含数字；排除标题栏英文句子、纯符号、图号/材料串。"""
+    """尺寸/数值候选：含数字或单独直径/角度符号（符号常与数字拆框）。"""
     t = (text or "").strip()
     if not t or len(t) > 40:
         return False
+    # 单独 Ø/° 等：保留，后续与邻近数字框合并
+    from pipeline.dimension_parse import is_dim_symbol_only
+
+    if is_dim_symbol_only(t):
+        return True
     if _MOSTLY_SYMBOL.match(t):
         return False
     if not re.search(r"\d", t):
@@ -67,7 +72,7 @@ def _looks_like_number_mark(text: str) -> bool:
     if re.fullmatch(r"\d{8,}[A-Za-z]?", t):
         return False
     # 长数字开头的图号变体（如 25001743T.2），无公差/直径符号
-    if re.match(r"\d{7,}", t) and not re.search(r"[±Ø⌀ФфΦφøRr°º]", t):
+    if re.match(r"\d{7,}", t) and not re.search(r"[±Ø⌀ФфΦφøRr°ºOoQqDd]", t):
         return False
     # 材料代号 / 标准号（常与物料表字段重复）
     if re.search(r"(?i)(?:din\s*en|sheet|cu[\s\-]?etp|material|siemens)", t):
@@ -80,6 +85,127 @@ def _looks_like_number_mark(text: str) -> bool:
     if letters >= 5 and letters >= digits * 2:
         return False
     return True
+
+
+def _merge_symbol_number_boxes(
+    instances: list[dict[str, Any]],
+    *,
+    gap_ratio: float = 1.8,
+) -> list[dict[str, Any]]:
+    """把单独符号框（Ø/°）与邻近数字框合并，避免直径/角度因符号漏检被拆丢。"""
+    from pipeline.dimension_parse import is_dim_symbol_only, normalize_ocr_dimension_text
+
+    if not instances:
+        return instances
+
+    symbols: list[tuple[int, dict[str, Any]]] = []
+    others: list[tuple[int, dict[str, Any]]] = []
+    for idx, inst in enumerate(instances):
+        text = str(inst.get("raw_text") or (inst.get("fields") or {}).get("text") or "").strip()
+        if is_dim_symbol_only(text):
+            symbols.append((idx, inst))
+        else:
+            others.append((idx, inst))
+    if not symbols:
+        return instances
+
+    used_other: set[int] = set()
+    used_sym: set[int] = set()
+    merged: list[dict[str, Any]] = []
+
+    def _center(b: list[int]) -> tuple[float, float]:
+        return ((b[0] + b[2]) / 2.0, (b[1] + b[3]) / 2.0)
+
+    def _side(b: list[int]) -> float:
+        return float(max(b[2] - b[0], b[3] - b[1], 1))
+
+    for si, sym in symbols:
+        sb = sym.get("bbox")
+        if not sb or len(sb) != 4:
+            continue
+        sx, sy = _center(sb)
+        st = str(sym.get("raw_text") or (sym.get("fields") or {}).get("text") or "").strip()
+        best_j = None
+        best_dist = 1e18
+        for oj, other in others:
+            if oj in used_other:
+                continue
+            if other.get("keep_pair"):
+                continue
+            ob = other.get("bbox")
+            if not ob or len(ob) != 4:
+                continue
+            ot = str(other.get("raw_text") or (other.get("fields") or {}).get("text") or "")
+            if not re.search(r"\d", ot):
+                continue
+            ox, oy = _center(ob)
+            dist = ((sx - ox) ** 2 + (sy - oy) ** 2) ** 0.5
+            gap = gap_ratio * max(_side(sb), _side(ob))
+            if dist > gap:
+                continue
+            if dist < best_dist:
+                best_dist = dist
+                best_j = oj
+        if best_j is None:
+            continue
+        other = next(o for j, o in others if j == best_j)
+        ob = list(other["bbox"])
+        ot = str(other.get("raw_text") or (other.get("fields") or {}).get("text") or "").strip()
+        # 符号在左/上 → 前缀；在右/下且为角度符 → 后缀
+        sym_left = sx <= (ob[0] + ob[2]) / 2.0
+        is_angle_sym = st in {"°", "º"}
+        if is_angle_sym:
+            combined = f"{ot}{st}" if not sym_left else f"{st}{ot}"
+        else:
+            combined = f"{st}{ot}" if sym_left else f"{ot}{st}"
+        combined = normalize_ocr_dimension_text(combined)
+        nb = [
+            min(sb[0], ob[0]),
+            min(sb[1], ob[1]),
+            max(sb[2], ob[2]),
+            max(sb[3], ob[3]),
+        ]
+        conf = max(float(sym.get("confidence") or 0), float(other.get("confidence") or 0))
+        out = dict(other)
+        out["bbox"] = nb
+        out["raw_text"] = combined
+        fields = dict(out.get("fields") or {})
+        fields["text"] = combined
+        fields["symbol_merged"] = True
+        out["fields"] = fields
+        out["confidence"] = conf
+        merged.append(out)
+        used_other.add(best_j)
+        used_sym.add(si)
+
+    result: list[dict[str, Any]] = []
+    for idx, inst in enumerate(instances):
+        if idx in used_sym or idx in used_other:
+            continue
+        # 未合并的纯符号框不再单独保留（无尺寸值）
+        text = str(inst.get("raw_text") or (inst.get("fields") or {}).get("text") or "").strip()
+        if is_dim_symbol_only(text):
+            continue
+        result.append(inst)
+    result.extend(merged)
+    return result
+
+
+def _normalize_ocr_instance_text(inst: dict[str, Any]) -> dict[str, Any]:
+    from pipeline.dimension_parse import normalize_ocr_dimension_text
+
+    out = dict(inst)
+    fields = dict(out.get("fields") or {})
+    raw = str(out.get("raw_text") or fields.get("text") or "")
+    norm = normalize_ocr_dimension_text(raw)
+    if norm and norm != raw:
+        out["raw_text"] = norm
+        fields["text"] = norm
+        out["fields"] = fields
+    elif fields.get("text"):
+        fields["text"] = normalize_ocr_dimension_text(str(fields.get("text")))
+        out["fields"] = fields
+    return out
 
 
 def _is_titleish_or_tiny_text(text: str, bbox: list[int], *, page_h: int) -> bool:
@@ -1020,6 +1146,12 @@ def perceive_number_overlap(
 
     ocr_insts = _dedupe_boxes(ocr_insts, iou_thr=0.75)
     ocr_insts = _cluster_near_duplicates(ocr_insts, iou_thr=0.28)
+    # 符号与数字拆框合并 + OCR 符号变体归一（Ø/°）
+    ocr_insts = _merge_symbol_number_boxes(ocr_insts)
+    ocr_insts = [_normalize_ocr_instance_text(i) for i in ocr_insts]
+    sym_merged = sum(
+        1 for i in ocr_insts if (i.get("fields") or {}).get("symbol_merged")
+    )
 
     # 2c) 按文本角 deskew 裁剪重读，提高倾斜/竖排解析准确率
     deskew_hits = 0
@@ -1062,6 +1194,7 @@ def perceive_number_overlap(
         f"local_ocr={notes_local}",
         f"angle_adapt_extra={adapt_extra}",
         f"deskew_reread={deskew_hits}",
+        f"symbol_merged={sym_merged}",
         f"detect_overlap={detect_overlap}",
         f"dimension_marks={parse_dims}",
         f"excluded_table_region={excluded_table}",

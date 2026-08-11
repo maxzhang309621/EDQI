@@ -197,7 +197,7 @@ def _normalize_dimension_marks_block(block: dict[str, Any]) -> dict[str, Any] | 
         "max_aspect_ratio": float(block.get("max_aspect_ratio", 8.0)),
         # ocr_locate_vlm_filter：送入 VLM 精筛的最大候选数
         "vlm_filter_max_candidates": int(block.get("vlm_filter_max_candidates", 48)),
-        "vlm_filter_crop_expand": float(block.get("vlm_filter_crop_expand", 0.12)),
+        "vlm_filter_crop_expand": float(block.get("vlm_filter_crop_expand", 0.22)),
     }
 
 

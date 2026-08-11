@@ -23,6 +23,7 @@ from pipeline.drawing_parse_plan import (
 )
 from pipeline.ingest import ingest
 from pipeline.dimension_parse import (
+    dedupe_dimension_attribute_instances,
     prescreen_ocr_dimension_candidates,
     sanitize_number_mark_instances,
 )
@@ -356,6 +357,7 @@ def perceive(
             exclude_pad=float(dim_cfg.get("exclude_table_pad", 2.0)),
             exclude_table_texts=table_tokens or None,
         )
+        cleaned, n_dedupe = dedupe_dimension_attribute_instances(cleaned)
         merged["instances"] = cleaned
         if isinstance(vl_payload.get("timing"), dict):
             merged["timing"] = vl_payload["timing"]
@@ -367,6 +369,7 @@ def perceive(
             f"table_exclude_boxes={len(exclude_bbs)}",
             f"table_value_tokens={len(table_tokens)}",
             f"number_mark_sanitized_dropped={n_drop}",
+            f"dimension_attr_deduped={n_dedupe}",
         ]
         return merged
 

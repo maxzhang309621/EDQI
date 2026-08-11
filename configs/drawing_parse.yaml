@@ -48,7 +48,8 @@ objects:
     max_bbox_area_ratio: 0.035
     max_aspect_ratio: 8.0
     vlm_filter_max_candidates: 48
-    vlm_filter_crop_expand: 0.12
+    # 略放大裁剪，避免 Ø/° 落在框外导致 VLM 看不到符号
+    vlm_filter_crop_expand: 0.22
     fields:
       - name: text
         parse_hint: 尺寸标注可见原文
