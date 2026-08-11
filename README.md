@@ -103,6 +103,11 @@ pip install "transformers>=4.57.0" torch accelerate qwen-vl-utils huggingface_hu
 
 # 推荐：轻量 VLM（Qwen3-VL-2B-Instruct，适配约 8GB 显存）
 python tools/download_models.py qwen3_vl
+# 若 SSL/连不上 HuggingFace，优先用镜像或 ModelScope：
+python tools/download_models.py qwen3_vl --mirror
+# 或:
+# $env:HF_ENDPOINT="https://hf-mirror.com"
+# python tools/download_models.py qwen3_vl
 # 等价 huggingface-cli：
 # huggingface-cli download Qwen/Qwen3-VL-2B-Instruct --local-dir models/Qwen3-VL-2B-Instruct
 
