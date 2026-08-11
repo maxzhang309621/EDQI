@@ -13,13 +13,16 @@ from pipeline.build_facts import build_facts
 from pipeline.drawing_parse_plan import (
     OCR_OVERLAP_ENTITY_IDS,
     build_drawing_parse_plan,
+    dimension_marks_backend,
     get_dimension_marks_config,
+    is_dimension_marks_ocr_locate_vlm,
     is_dimension_marks_vlm,
     is_tables_only,
     merge_perception_plans,
     split_plan_for_backends,
 )
 from pipeline.ingest import ingest
+from pipeline.dimension_parse import prescreen_ocr_dimension_candidates
 from pipeline.perceive_common import (
     build_table_exclude_regions,
     collect_table_value_tokens,
@@ -29,7 +32,10 @@ from pipeline.perceive_common import (
 )
 from pipeline.perceive_la_ocr import perceive_la_ocr
 from pipeline.perceive_number_overlap import perceive_number_overlap
-from pipeline.perceive_qwen_vl import perceive_qwen_vl
+from pipeline.perceive_qwen_vl import (
+    filter_ocr_dimension_candidates_with_vlm,
+    perceive_qwen_vl,
+)
 from pipeline.perceive_utils import perceive_with_cache_and_tiles
 from pipeline.render_report import render_report
 from pipeline.review_queue import enqueue_from_result
@@ -210,20 +216,26 @@ def perceive(
             )
         return fn(image_path, sub_plan, meta, config)
 
-    # VL 配置实体 + 重叠实体：双后端合并
+    # VL 配置实体 + 重叠/OCR 属性实体：双后端合并
+    # 纯 vlm 尺寸且无 VL 实体时不进此支；ocr / ocr_locate_vlm_filter 可在无表格时仍跑 OCR→(VLM精筛)
     if (
         dual
         and auto
         and ocr_plan
-        and vl_plan
         and backend in {"qwen_vl", "hybrid"}
+        and (vl_plan or not is_dimension_marks_vlm(config))
     ):
-        vl_payload = _wrap("qwen_vl", perceive_qwen_vl, vl_plan)
+        if vl_plan:
+            vl_payload = _wrap("qwen_vl", perceive_qwen_vl, vl_plan)
+        else:
+            vl_payload = {"backend": "qwen_vl", "instances": [], "notes": ["vl_plan_empty"]}
         dim_cfg = get_dimension_marks_config(config)
+        dim_backend = dimension_marks_backend(config)
         dim_vlm = is_dimension_marks_vlm(config)
+        dim_ocr_vlm = is_dimension_marks_ocr_locate_vlm(config)
         exclude_bbs: list[list[int]] = []
         table_tokens: set[str] = set()
-        # 仅 OCR 属性路径需要按表格框过滤 OCR；VLM 属性时重叠 OCR 独立，不做表格剔除
+        # OCR 属性路径（ocr / ocr_locate_vlm_filter）按表格框过滤候选
         if (not dim_vlm) and bool(dim_cfg.get("exclude_table_regions", True)):
             page_w = int(meta.get("width") or 0)
             page_h = int(meta.get("height") or 0)
@@ -248,14 +260,56 @@ def perceive(
             exclude_table_texts=table_tokens or None,
         )
         ocr_instances = list(ocr_payload.get("instances") or [])
+        ocr_notes = list(ocr_payload.get("notes") or [])
         if dim_vlm:
-            # 属性已由 VLM 负责：重叠 OCR 只保留 keep_pair 证据，避免无关文本进 facts
+            # 属性已由 VLM 全图定位：重叠 OCR 只保留 keep_pair 证据
             before = len(ocr_instances)
             ocr_instances = [i for i in ocr_instances if i.get("keep_pair")]
-            ocr_payload = {**ocr_payload, "instances": ocr_instances}
-            ocr_notes = list(ocr_payload.get("notes") or [])
             ocr_notes.append(f"ocr_keep_pair_only={len(ocr_instances)}/{before}")
-            ocr_payload["notes"] = ocr_notes
+        elif dim_ocr_vlm:
+            # OCR 宽召回+规则初筛 → VLM crop 精筛；keep_pair 原样保留
+            page_w = int(meta.get("width") or 0)
+            page_h = int(meta.get("height") or 0)
+            dim_ent = next(
+                (
+                    e
+                    for e in ocr_plan
+                    if str(e.get("parse_kind") or "").lower() == "dimension_marks"
+                ),
+                None,
+            )
+            if dim_ent is None:
+                dim_ent = {
+                    **dim_cfg,
+                    "parse_kind": "dimension_marks",
+                    "entity_id": str(dim_cfg.get("entity_id") or "number_mark"),
+                    "fields": dim_cfg.get("fields") or [],
+                }
+            candidates, keep_pairs, dropped = prescreen_ocr_dimension_candidates(
+                ocr_instances,
+                page_w=page_w,
+                page_h=page_h,
+                require_dim_kind=bool(dim_ent.get("require_dim_kind", True)),
+                require_basic_size=bool(dim_ent.get("require_basic_size", True)),
+                max_bbox_width_ratio=float(dim_ent.get("max_bbox_width_ratio", 0.28)),
+                max_aspect_ratio=float(dim_ent.get("max_aspect_ratio", 8.0)),
+                max_candidates=int(dim_ent.get("vlm_filter_max_candidates", 48)),
+            )
+            ocr_notes.append(
+                f"ocr_dim_prescreen={len(candidates)}/{max(0, len(ocr_instances) - len(keep_pairs))}"
+            )
+            ocr_notes.append(f"ocr_dim_prescreen_dropped={dropped}")
+            ocr_notes.append(f"ocr_keep_pair={len(keep_pairs)}")
+            accepted = filter_ocr_dimension_candidates_with_vlm(
+                image_path,
+                candidates,
+                dim_ent,
+                meta,
+                config,
+                notes=ocr_notes,
+            )
+            ocr_instances = accepted + keep_pairs
+        ocr_payload = {**ocr_payload, "instances": ocr_instances, "notes": ocr_notes}
         merged = _merge_instance_payloads(
             vl_payload,
             ocr_payload,
@@ -267,7 +321,7 @@ def perceive(
             "dual_backend=vl+number_overlap",
             f"vl_entities={[e.get('entity_id') for e in vl_plan]}",
             f"ocr_entities={[e.get('entity_id') for e in ocr_plan]}",
-            f"dimension_marks_backend={'vlm' if dim_vlm else 'ocr'}",
+            f"dimension_marks_backend={dim_backend}",
             f"table_exclude_boxes={len(exclude_bbs)}",
             f"table_value_tokens={len(table_tokens)}",
         ]

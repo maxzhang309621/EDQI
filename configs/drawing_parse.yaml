@@ -15,33 +15,37 @@ tables_only: false
 
 # ---------- 非表格：区域/对象 ----------
 # parse_kind=dimension_marks：尺寸标注属性（Ø/R/长度/° + 基本尺寸/公差）
-# backend=vlm（默认）：走 Qwen-VL，与数字重叠 OCR 独立；backend=ocr 可回退旧路径
+# backend（默认 ocr_locate_vlm_filter）:
+#   ocr_locate_vlm_filter — OCR 宽召回+规则初筛 → VLM crop 精筛（推荐，利于 4B）
+#   vlm — VLM 全图定位+字段；ocr — 仅 OCR 规则解析
 objects:
   - enabled: true
     entity_id: number_mark
     parse_kind: dimension_marks
-    backend: vlm
+    backend: ocr_locate_vlm_filter
     locate_query: 图中尺寸数字或数值标注（Ø直径 / R半径 / 长度 / °角度）；排除标题栏/图号/材料牌号
     cardinality: many
     # false=属性路径不做墨迹重叠配对；规则启用 NUM_TEXT_NO_OVERLAP 时重叠仍走独立 OCR
     detect_overlap: false
-    # 仅 backend=ocr 时生效（不影响 perception.number_overlap）
+    # OCR 定位/初筛增强（不影响 perception.number_overlap 的重叠检测角度策略）
     ocr_angle_adapt: true
     ocr_angle_adapt_step: 15
     ocr_angle_adapt_min_count: 2
     ocr_angle_adapt_max_extra: 4
     ocr_deskew_reread: true
     ocr_deskew_min_angle: 8
-    # backend=ocr/vlm：排除表格区域内的尺寸属性
+    # 排除表格区域内的尺寸属性
     exclude_table_regions: true
     exclude_table_pad: 2
     exclude_table_expand_up: 0.12
-    # 严格模式：只识别配置 fields 中的尺寸属性，丢弃非尺寸/畸形框
+    # 严格模式：OCR 初筛 + VLM 精筛后只保留配置 fields 中的合法尺寸
     strict_fields_only: true
     require_dim_kind: true
     require_basic_size: true
     max_bbox_width_ratio: 0.28
     max_aspect_ratio: 8.0
+    vlm_filter_max_candidates: 48
+    vlm_filter_crop_expand: 0.12
     fields:
       - name: text
         parse_hint: 尺寸标注可见原文

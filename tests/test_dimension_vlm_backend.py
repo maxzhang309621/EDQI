@@ -25,8 +25,31 @@ from pipeline.perceive_qwen_vl import (
 
 def test_default_backend_is_vlm():
     cfg = load_config(ROOT / "configs" / "default.yaml")
-    assert dimension_marks_backend(cfg) == "vlm"
-    assert is_dimension_marks_vlm(cfg) is True
+    # 兼容：显式切回 vlm 时仍可用
+    from pipeline.drawing_parse_plan import get_dimension_marks_config
+
+    raw = dict(get_dimension_marks_config(cfg))
+    raw["backend"] = "vlm"
+    # 用 plan 实体测路由
+    plan = [
+        {
+            "entity_id": "number_mark",
+            "parse_kind": "dimension_marks",
+            "backend": "vlm",
+            "locate_query": "尺寸",
+            "fields": [],
+        },
+        {"entity_id": "main_table", "parse_kind": "table", "fields": []},
+    ]
+    ocr, vl = split_plan_for_backends(plan)
+    assert any(e.get("parse_kind") == "dimension_marks" for e in vl)
+    assert not any(e.get("parse_kind") == "dimension_marks" for e in ocr)
+    assert dimension_marks_backend({"drawing_parse_config": "configs/drawing_parse.yaml"}) in {
+        "ocr_locate_vlm_filter",
+        "vlm",
+        "ocr",
+    }
+    assert is_dimension_marks_vlm(cfg) is False  # 默认已切到 ocr_locate_vlm_filter
 
 
 def test_merged_plan_splits_rule_ocr_and_vlm_dims():
@@ -36,12 +59,10 @@ def test_merged_plan_splits_rule_ocr_and_vlm_dims():
         build_drawing_parse_plan(cfg),
     )
     ocr, vl = split_plan_for_backends(plan)
-    assert any(e.get("entity_id") == "number_mark" and e.get("parse_kind") != "dimension_marks" for e in ocr) or any(
-        e.get("entity_id") == "number_mark" for e in ocr
-    )
-    # 规则 number_mark 在 OCR；drawing_parse dimension_marks 在 VL
-    assert any(e.get("parse_kind") == "dimension_marks" for e in vl)
-    assert not any(e.get("parse_kind") == "dimension_marks" for e in ocr)
+    # 默认 ocr_locate_vlm_filter：尺寸进 OCR；表格进 VL
+    assert any(e.get("parse_kind") == "dimension_marks" for e in ocr)
+    assert not any(e.get("parse_kind") == "dimension_marks" for e in vl)
+    assert any(e.get("entity_id") == "number_mark" for e in ocr)
 
 
 def test_enrich_preserves_vlm_values_and_fills_angle():

@@ -16,7 +16,7 @@ from PIL import Image
 
 from pipeline import load_config, resolve_path
 from pipeline.dimension_parse import apply_dimension_parse_to_instances
-from pipeline.drawing_parse_plan import dimension_marks_backend, get_dimension_marks_config
+from pipeline.drawing_parse_plan import dimension_marks_uses_ocr_parse, get_dimension_marks_config
 from pipeline.perceive_common import (
     filter_instances_matching_table_values,
     filter_instances_outside_bboxes,
@@ -839,8 +839,8 @@ def perceive_number_overlap(
     overlap_cfg = (cfg.get("perception") or {}).get("number_overlap") or {}
     ocr_cfg = cfg.get("models", {}).get("ocr", {})
     dim_cfg = get_dimension_marks_config(cfg)
-    # 仅 backend=ocr 时在本路径做尺寸属性解析；vlm 属性由 Qwen-VL 负责
-    parse_dims = bool(dim_cfg.get("enabled", False)) and dimension_marks_backend(cfg) == "ocr"
+    # ocr / ocr_locate_vlm_filter：本路径做尺寸解析与规则初筛；纯 vlm 属性不在此解析
+    parse_dims = dimension_marks_uses_ocr_parse(cfg)
     # drawing_parse.dimension_marks.detect_overlap；若启用重叠规则则强制开
     detect_overlap = bool(dim_cfg.get("detect_overlap", False))
     if rules and any(str(r.get("rule_id") or "") == "NUM_TEXT_NO_OVERLAP" for r in rules):

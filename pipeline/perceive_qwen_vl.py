@@ -249,6 +249,122 @@ def _dimension_marks_pass2_prompt(ent: dict[str, Any]) -> str:
     )
 
 
+def filter_ocr_dimension_candidates_with_vlm(
+    image_path: str | Path,
+    candidates: list[dict[str, Any]],
+    ent: dict[str, Any],
+    meta: dict[str, Any] | None = None,
+    config: dict[str, Any] | None = None,
+    *,
+    notes: list[str] | None = None,
+    allow_mock_fallback: bool = True,
+    generate_fn=None,
+) -> list[dict[str, Any]]:
+    """对 OCR 初筛后的尺寸候选做 VLM crop 精筛；保留 OCR bbox，只更新字段。"""
+    import json
+
+    if not candidates:
+        if notes is not None:
+            notes.append("vlm_dim_filter=0/0")
+        return []
+
+    cfg = config or load_config()
+    model_cfg = cfg.get("models", {}).get("qwen3_vl", {})
+    meta = meta or {}
+    image = Image.open(resolve_path(image_path)).convert("RGB")
+    width, height = image.size
+    meta.setdefault("width", width)
+    meta.setdefault("height", height)
+
+    flags = _dimension_ent_strict_flags(ent)
+    allowed = [str(f.get("name")) for f in (ent.get("fields") or []) if f.get("name")]
+    expand = float(ent.get("vlm_filter_crop_expand", model_cfg.get("crop_expand", 0.12)))
+    max_tokens = int(ent.get("max_new_tokens") or model_cfg.get("max_new_tokens", 512))
+    # 精筛只需短 JSON
+    max_tokens = min(max_tokens, 512)
+    field_prompt = _dimension_marks_pass2_prompt(ent)
+
+    use_mock = False
+    model = processor = None
+    if generate_fn is None:
+        if not model_path_ready(model_cfg):
+            if allow_mock_fallback:
+                use_mock = True
+                if notes is not None:
+                    notes.append("vlm_dim_filter_mock=true")
+            else:
+                raise FileNotFoundError(model_cfg.get("path"))
+        else:
+            model, processor = _load_vlm(model_cfg)
+
+    kept: list[dict[str, Any]] = []
+    rejected = 0
+    for inst in candidates:
+        bbox = inst.get("bbox")
+        if not bbox or len(bbox) != 4:
+            rejected += 1
+            continue
+        crop_box = expand_bbox(list(bbox), width, height, expand)
+        crop = image.crop(tuple(crop_box))
+        ocr_fields = dict(inst.get("fields") or {})
+        ocr_text = str(inst.get("raw_text") or ocr_fields.get("text") or "")
+        try:
+            if generate_fn is not None:
+                text2 = generate_fn(crop, field_prompt, max_tokens)
+            elif use_mock:
+                # 无权重时沿用 OCR 初筛结果，避免整批属性被清空
+                payload = {
+                    "fields": {
+                        "text": ocr_text,
+                        "dim_kind": ocr_fields.get("dim_kind"),
+                        "basic_size": ocr_fields.get("basic_size"),
+                        "tolerance": ocr_fields.get("tolerance"),
+                        "has_tolerance": ocr_fields.get("has_tolerance"),
+                        "angle": ocr_fields.get("angle"),
+                    },
+                    "raw_text": ocr_text,
+                }
+                text2 = json.dumps(payload, ensure_ascii=False)
+            else:
+                text2 = _vlm_generate(model, processor, crop, field_prompt, max_tokens)
+            parsed = extract_json_payload_safe(text2, default={})
+            if isinstance(parsed, list) and parsed:
+                parsed = parsed[0]
+            fields = parsed.get("fields", parsed) if isinstance(parsed, dict) else {}
+            if not isinstance(fields, dict):
+                fields = {}
+            raw_text = str(parsed.get("raw_text") or "") if isinstance(parsed, dict) else ""
+            text_v = str(fields.get("text") or raw_text or ocr_text or "")
+            fields = enrich_dimension_fields_from_text(fields, text_v, bbox=bbox)
+            if flags["strict"]:
+                fields = clip_fields_to_schema(fields, allowed)
+            fields["ocr_prescreen"] = True
+            fields["vlm_filtered"] = True
+            if not is_valid_dimension_mark(
+                fields,
+                text=text_v,
+                require_dim_kind=flags["require_dim_kind"],
+                require_basic_size=flags["require_basic_size"],
+            ):
+                rejected += 1
+                continue
+            out = dict(inst)
+            out["fields"] = fields
+            out["raw_text"] = text_v or out.get("raw_text") or ""
+            if fields.get("angle") is not None:
+                out["angle"] = fields.get("angle")
+            out["label"] = out.get("label") or ent.get("locate_query") or "number_mark"
+            kept.append(out)
+        except Exception:
+            rejected += 1
+            continue
+
+    if notes is not None:
+        notes.append(f"vlm_dim_filter={len(kept)}/{len(candidates)}")
+        notes.append(f"vlm_dim_rejected={rejected}")
+    return kept
+
+
 def _dimension_ent_strict_flags(ent: dict[str, Any]) -> dict[str, Any]:
     return {
         "strict": bool(ent.get("strict_fields_only", True)),

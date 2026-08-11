@@ -245,3 +245,68 @@ def bbox_geometry_ok(
     if ar > max_aspect_ratio:
         return False
     return True
+
+
+def prescreen_ocr_dimension_candidates(
+    instances: list[dict[str, Any]],
+    *,
+    page_w: int,
+    page_h: int,
+    require_dim_kind: bool = True,
+    require_basic_size: bool = True,
+    max_bbox_width_ratio: float = 0.28,
+    max_aspect_ratio: float = 8.0,
+    max_candidates: int | None = None,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], int]:
+    """OCR 属性初筛：保留 keep_pair；非重叠实例按尺寸规则过滤后作为 VLM 候选。
+
+    返回 (candidates, keep_pairs, dropped_non_pair)。
+    """
+    keep_pairs: list[dict[str, Any]] = []
+    candidates: list[dict[str, Any]] = []
+    dropped = 0
+    for inst in instances:
+        if not isinstance(inst, dict):
+            continue
+        if inst.get("keep_pair"):
+            keep_pairs.append(inst)
+            continue
+        fields = dict(inst.get("fields") or {})
+        text_v = str(inst.get("raw_text") or fields.get("text") or "")
+        fields = enrich_dimension_fields_from_text(fields, text_v, bbox=inst.get("bbox"))
+        if not bbox_geometry_ok(
+            inst.get("bbox"),
+            page_w=page_w,
+            page_h=page_h,
+            max_width_ratio=max_bbox_width_ratio,
+            max_aspect_ratio=max_aspect_ratio,
+        ):
+            dropped += 1
+            continue
+        if not is_valid_dimension_mark(
+            fields,
+            text=text_v,
+            require_dim_kind=require_dim_kind,
+            require_basic_size=require_basic_size,
+        ):
+            dropped += 1
+            continue
+        out = dict(inst)
+        out["fields"] = {**fields, "ocr_prescreen": True}
+        if fields.get("text") and not out.get("raw_text"):
+            out["raw_text"] = fields.get("text")
+        if fields.get("angle") is not None:
+            out["angle"] = fields.get("angle")
+        candidates.append(out)
+
+    if max_candidates is not None and max_candidates >= 0 and len(candidates) > max_candidates:
+        # 优先高置信度；同置信度保留原序
+        ranked = sorted(
+            enumerate(candidates),
+            key=lambda t: (-float(t[1].get("confidence") or 0.0), t[0]),
+        )
+        keep_idx = {i for i, _ in ranked[:max_candidates]}
+        dropped += len(candidates) - max_candidates
+        candidates = [c for i, c in enumerate(candidates) if i in keep_idx]
+
+    return candidates, keep_pairs, dropped

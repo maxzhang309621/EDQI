@@ -109,14 +109,43 @@ def is_dimension_marks_enabled(config: dict[str, Any] | None = None) -> bool:
     return bool(get_dimension_marks_config(config).get("enabled", False))
 
 
+_DIM_BACKEND_ALIASES = {
+    "ocr": "ocr",
+    "vlm": "vlm",
+    "ocr_locate_vlm_filter": "ocr_locate_vlm_filter",
+    "ocr_vlm": "ocr_locate_vlm_filter",
+    "ocr+vlm": "ocr_locate_vlm_filter",
+    "hybrid": "ocr_locate_vlm_filter",
+}
+
+
 def dimension_marks_backend(config: dict[str, Any] | None = None) -> str:
-    """尺寸属性后端：vlm（默认）| ocr。"""
-    raw = str(get_dimension_marks_config(config).get("backend") or "vlm").strip().lower()
-    return "ocr" if raw == "ocr" else "vlm"
+    """尺寸属性后端：ocr_locate_vlm_filter（默认）| vlm | ocr。
+
+    - ocr：OCR 定位 + 规则解析（无 VLM）
+    - vlm：VLM 全图定位 + 字段（OCR 仅保留 keep_pair）
+    - ocr_locate_vlm_filter：OCR 宽召回+规则初筛，再用 VLM crop 精筛
+    """
+    raw = str(get_dimension_marks_config(config).get("backend") or "ocr_locate_vlm_filter").strip().lower()
+    return _DIM_BACKEND_ALIASES.get(raw, "ocr_locate_vlm_filter")
 
 
 def is_dimension_marks_vlm(config: dict[str, Any] | None = None) -> bool:
     return is_dimension_marks_enabled(config) and dimension_marks_backend(config) == "vlm"
+
+
+def is_dimension_marks_ocr_locate_vlm(config: dict[str, Any] | None = None) -> bool:
+    return (
+        is_dimension_marks_enabled(config)
+        and dimension_marks_backend(config) == "ocr_locate_vlm_filter"
+    )
+
+
+def dimension_marks_uses_ocr_parse(config: dict[str, Any] | None = None) -> bool:
+    """是否在 OCR 路径做尺寸文本解析/初筛。"""
+    if not is_dimension_marks_enabled(config):
+        return False
+    return dimension_marks_backend(config) in {"ocr", "ocr_locate_vlm_filter"}
 
 
 def _normalize_dimension_marks_block(block: dict[str, Any]) -> dict[str, Any] | None:
@@ -134,9 +163,8 @@ def _normalize_dimension_marks_block(block: dict[str, Any]) -> dict[str, Any] | 
                 {"name": "has_tolerance", "parse_hint": "是否标明公差"},
             ]
         )
-    backend = str(block.get("backend") or "vlm").strip().lower()
-    if backend not in {"vlm", "ocr"}:
-        backend = "vlm"
+    backend_raw = str(block.get("backend") or "ocr_locate_vlm_filter").strip().lower()
+    backend = _DIM_BACKEND_ALIASES.get(backend_raw, "ocr_locate_vlm_filter")
     return {
         "entity_id": str(block.get("entity_id") or "number_mark"),
         "locate_query": str(
@@ -148,14 +176,14 @@ def _normalize_dimension_marks_block(block: dict[str, Any]) -> dict[str, Any] | 
         "parse_kind": "dimension_marks",
         "backend": backend,
         "detect_overlap": bool(block.get("detect_overlap", False)),
-        # 尺寸属性专用 OCR 增强（仅 backend=ocr；与 perception.number_overlap 独立）
+        # 尺寸属性专用 OCR 增强（ocr / ocr_locate_vlm_filter；与 perception.number_overlap 独立）
         "ocr_angle_adapt": bool(block.get("ocr_angle_adapt", False)),
         "ocr_angle_adapt_step": float(block.get("ocr_angle_adapt_step", 15)),
         "ocr_angle_adapt_min_count": int(block.get("ocr_angle_adapt_min_count", 2)),
         "ocr_angle_adapt_max_extra": int(block.get("ocr_angle_adapt_max_extra", 4)),
         "ocr_deskew_reread": bool(block.get("ocr_deskew_reread", False)),
         "ocr_deskew_min_angle": float(block.get("ocr_deskew_min_angle", 8.0)),
-        # 默认排除表格框内 OCR 数字（尺寸属性仅表格外；主要用于 backend=ocr）
+        # 默认排除表格框内 OCR 数字（尺寸属性仅表格外）
         "exclude_table_regions": bool(block.get("exclude_table_regions", True)),
         "exclude_table_pad": float(block.get("exclude_table_pad", 2.0)),
         "exclude_table_expand_up": float(block.get("exclude_table_expand_up", 0.12)),
@@ -165,6 +193,9 @@ def _normalize_dimension_marks_block(block: dict[str, Any]) -> dict[str, Any] | 
         "require_basic_size": bool(block.get("require_basic_size", True)),
         "max_bbox_width_ratio": float(block.get("max_bbox_width_ratio", 0.28)),
         "max_aspect_ratio": float(block.get("max_aspect_ratio", 8.0)),
+        # ocr_locate_vlm_filter：送入 VLM 精筛的最大候选数
+        "vlm_filter_max_candidates": int(block.get("vlm_filter_max_candidates", 48)),
+        "vlm_filter_crop_expand": float(block.get("vlm_filter_crop_expand", 0.12)),
     }
 
 
@@ -281,15 +312,21 @@ def split_plan_for_backends(
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """返回 (ocr_overlap_plan, vl_plan)。
 
-    dimension_marks + backend=vlm → VL；backend=ocr 或规则重叠实体 → OCR。
+    dimension_marks:
+      - vlm → 仅 VL 全图定位
+      - ocr / ocr_locate_vlm_filter → OCR 定位（后者再经 VLM crop 精筛，不进 VL 全图 locate）
     """
     ocr: list[dict[str, Any]] = []
     vl: list[dict[str, Any]] = []
     for ent in plan:
         parse_kind = str(ent.get("parse_kind") or "").lower()
-        backend = str(ent.get("backend") or "vlm").strip().lower()
-        if parse_kind == "dimension_marks" and backend != "ocr":
-            vl.append(ent)
+        backend = str(ent.get("backend") or "ocr_locate_vlm_filter").strip().lower()
+        backend = _DIM_BACKEND_ALIASES.get(backend, backend)
+        if parse_kind == "dimension_marks":
+            if backend == "vlm":
+                vl.append(ent)
+            else:
+                ocr.append(ent)
             continue
         if ent.get("entity_id") in OCR_OVERLAP_ENTITY_IDS:
             ocr.append(ent)
