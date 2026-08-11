@@ -50,11 +50,11 @@ models:
     enable_thinking: false
     max_new_tokens: 2048
 
-  # 主路径 VLM：定位 + 字段解析（默认 2B，适配约 8GB 显存）
+  # 主路径 VLM：定位 + 字段解析（默认 4B；8GB 显存建议 float16，仍紧可改 2B 或量化）
   qwen3_vl:
-    path: models/Qwen3-VL-2B-Instruct
-    hf_id: Qwen/Qwen3-VL-2B-Instruct
-    # 更大: Qwen/Qwen3-VL-4B-Instruct / Qwen/Qwen3-VL-8B-Instruct
+    path: models/Qwen3-VL-4B-Instruct
+    hf_id: Qwen/Qwen3-VL-4B-Instruct
+    # 更小: Qwen/Qwen3-VL-2B-Instruct；更大: Qwen/Qwen3-VL-8B-Instruct
     device: auto
     dtype: auto
     max_new_tokens: 2048

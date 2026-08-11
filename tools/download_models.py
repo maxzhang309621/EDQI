@@ -38,8 +38,8 @@ def download_hf(repo_id: str, local_dir: Path, *, endpoint: str | None = None) -
             "  1) 国内镜像: python tools/download_models.py qwen3_vl --mirror\n"
             "  2) ModelScope: pip install modelscope && "
             "python tools/download_models.py qwen3_vl --source modelscope\n"
-            "  3) 手动: huggingface-cli download Qwen/Qwen3-VL-2B-Instruct "
-            "--local-dir models/Qwen3-VL-2B-Instruct\n"
+            "  3) 手动: huggingface-cli download Qwen/Qwen3-VL-4B-Instruct "
+            "--local-dir models/Qwen3-VL-4B-Instruct\n"
             "     （先设 $env:HF_ENDPOINT='https://hf-mirror.com'）\n"
         )
         if "CERTIFICATE" in msg.upper() or "SSL" in msg.upper() or "ConnectError" in msg:
