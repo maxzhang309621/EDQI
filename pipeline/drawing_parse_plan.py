@@ -191,7 +191,9 @@ def _normalize_dimension_marks_block(block: dict[str, Any]) -> dict[str, Any] | 
         "strict_fields_only": bool(block.get("strict_fields_only", True)),
         "require_dim_kind": bool(block.get("require_dim_kind", True)),
         "require_basic_size": bool(block.get("require_basic_size", True)),
-        "max_bbox_width_ratio": float(block.get("max_bbox_width_ratio", 0.28)),
+        "max_bbox_width_ratio": float(block.get("max_bbox_width_ratio", 0.22)),
+        "max_bbox_height_ratio": float(block.get("max_bbox_height_ratio", 0.12)),
+        "max_bbox_area_ratio": float(block.get("max_bbox_area_ratio", 0.035)),
         "max_aspect_ratio": float(block.get("max_aspect_ratio", 8.0)),
         # ocr_locate_vlm_filter：送入 VLM 精筛的最大候选数
         "vlm_filter_max_candidates": int(block.get("vlm_filter_max_candidates", 48)),

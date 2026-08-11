@@ -22,7 +22,10 @@ from pipeline.drawing_parse_plan import (
     split_plan_for_backends,
 )
 from pipeline.ingest import ingest
-from pipeline.dimension_parse import prescreen_ocr_dimension_candidates
+from pipeline.dimension_parse import (
+    prescreen_ocr_dimension_candidates,
+    sanitize_number_mark_instances,
+)
 from pipeline.perceive_common import (
     build_table_exclude_regions,
     collect_table_value_tokens,
@@ -291,9 +294,14 @@ def perceive(
                 page_h=page_h,
                 require_dim_kind=bool(dim_ent.get("require_dim_kind", True)),
                 require_basic_size=bool(dim_ent.get("require_basic_size", True)),
-                max_bbox_width_ratio=float(dim_ent.get("max_bbox_width_ratio", 0.28)),
+                max_bbox_width_ratio=float(dim_ent.get("max_bbox_width_ratio", 0.22)),
                 max_aspect_ratio=float(dim_ent.get("max_aspect_ratio", 8.0)),
+                max_height_ratio=float(dim_ent.get("max_bbox_height_ratio", 0.12)),
+                max_area_ratio=float(dim_ent.get("max_bbox_area_ratio", 0.035)),
                 max_candidates=int(dim_ent.get("vlm_filter_max_candidates", 48)),
+                exclude_bboxes=exclude_bbs or None,
+                exclude_pad=float(dim_ent.get("exclude_table_pad", 2.0)),
+                exclude_table_texts=table_tokens or None,
             )
             ocr_notes.append(
                 f"ocr_dim_prescreen={len(candidates)}/{max(0, len(ocr_instances) - len(keep_pairs))}"
@@ -315,6 +323,40 @@ def perceive(
             ocr_payload,
             backend=f"{vl_payload.get('backend', 'qwen_vl')}+number_overlap",
         )
+        # 最终清理：大范围假框 / 非声明属性 / 表格区内 number_mark
+        page_w = int(meta.get("width") or 0)
+        page_h = int(meta.get("height") or 0)
+        if not exclude_bbs and bool(dim_cfg.get("exclude_table_regions", True)):
+            exclude_bbs = build_table_exclude_regions(
+                merged.get("instances") or [],
+                page_w=page_w,
+                page_h=page_h,
+                pad=float(dim_cfg.get("exclude_table_pad", 2.0)),
+                expand_up_frac=float(dim_cfg.get("exclude_table_expand_up", 0.12)),
+            )
+            if not table_tokens:
+                table_tokens = collect_table_value_tokens(merged.get("instances") or [])
+        allowed_names = [
+            str(f.get("name"))
+            for f in (dim_cfg.get("fields") or [])
+            if isinstance(f, dict) and f.get("name")
+        ]
+        cleaned, n_drop = sanitize_number_mark_instances(
+            list(merged.get("instances") or []),
+            page_w=page_w,
+            page_h=page_h,
+            allowed_field_names=allowed_names or None,
+            require_dim_kind=bool(dim_cfg.get("require_dim_kind", True)),
+            require_basic_size=bool(dim_cfg.get("require_basic_size", True)),
+            max_bbox_width_ratio=float(dim_cfg.get("max_bbox_width_ratio", 0.22)),
+            max_aspect_ratio=float(dim_cfg.get("max_aspect_ratio", 8.0)),
+            max_height_ratio=float(dim_cfg.get("max_bbox_height_ratio", 0.12)),
+            max_area_ratio=float(dim_cfg.get("max_bbox_area_ratio", 0.035)),
+            exclude_bboxes=exclude_bbs or None,
+            exclude_pad=float(dim_cfg.get("exclude_table_pad", 2.0)),
+            exclude_table_texts=table_tokens or None,
+        )
+        merged["instances"] = cleaned
         if isinstance(vl_payload.get("timing"), dict):
             merged["timing"] = vl_payload["timing"]
         merged["notes"] = list(merged.get("notes") or []) + [
@@ -324,6 +366,7 @@ def perceive(
             f"dimension_marks_backend={dim_backend}",
             f"table_exclude_boxes={len(exclude_bbs)}",
             f"table_value_tokens={len(table_tokens)}",
+            f"number_mark_sanitized_dropped={n_drop}",
         ]
         return merged
 

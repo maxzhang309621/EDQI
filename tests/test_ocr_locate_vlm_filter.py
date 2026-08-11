@@ -68,34 +68,133 @@ def test_prescreen_keeps_pairs_and_valid_dims():
                 "keep_pair": True,
                 "confidence": 0.95,
             },
+            {
+                "entity_id": "number_mark",
+                "bbox": [1024, 0, 2048, 1169],
+                "raw_text": "图中无尺寸标注",
+                "fields": {"text": "图中无尺寸标注"},
+                "confidence": 0.5,
+            },
+            {
+                "entity_id": "number_mark",
+                "bbox": [1600, 1130, 1650, 1155],
+                "raw_text": "7295.9",
+                "fields": {"text": "7295.9"},
+                "confidence": 0.9,
+            },
         ]
     )
     cands, pairs, dropped = prescreen_ocr_dimension_candidates(
-        instances, page_w=2048, page_h=1448
+        instances,
+        page_w=2048,
+        page_h=1448,
+        exclude_bboxes=[[1108, 1090, 2009, 1430]],
     )
     assert len(pairs) == 1
     assert pairs[0].get("keep_pair") is True
     assert len(cands) == 1
     assert cands[0]["fields"].get("dim_kind") == "length"
-    assert dropped >= 1
+    assert dropped >= 3
+
+
+def test_vlm_filter_rejects_null_without_ocr_fallback(tmp_path: Path):
+    img = Image.new("RGB", (200, 80), (255, 255, 255))
+    path = tmp_path / "p2.png"
+    img.save(path)
+    candidates = [
+        {
+            "entity_id": "number_mark",
+            "bbox": [10, 10, 50, 30],
+            "raw_text": "12±0.1",
+            "fields": {"text": "12±0.1", "dim_kind": "length", "basic_size": "12"},
+            "confidence": 0.9,
+        }
+    ]
+    ent = {
+        "parse_kind": "dimension_marks",
+        "strict_fields_only": True,
+        "require_dim_kind": True,
+        "require_basic_size": True,
+        "fields": [{"name": "text"}, {"name": "dim_kind"}, {"name": "basic_size"}],
+    }
+
+    def gen_null(crop, prompt, max_tokens):
+        return json.dumps(
+            {
+                "fields": {
+                    "text": None,
+                    "dim_kind": None,
+                    "basic_size": None,
+                    "tolerance": None,
+                    "has_tolerance": False,
+                    "angle": None,
+                },
+                "raw_text": "",
+            }
+        )
+
+    notes: list[str] = []
+    kept = filter_ocr_dimension_candidates_with_vlm(
+        path, candidates, ent, meta={"width": 200, "height": 80}, notes=notes, generate_fn=gen_null
+    )
+    assert kept == []
+    assert any("vlm_dim_rejected=" in n for n in notes)
+
+
+def test_sanitize_drops_huge_and_table_marks():
+    from pipeline.dimension_parse import sanitize_number_mark_instances
+
+    instances = [
+        {
+            "entity_id": "number_mark",
+            "bbox": [1024, 0, 2048, 1169],
+            "fields": {"text": "x", "dim_kind": "length", "basic_size": "1"},
+            "raw_text": "x",
+        },
+        {
+            "entity_id": "number_mark",
+            "bbox": [1200, 1120, 1250, 1145],
+            "fields": {"text": "65.1", "dim_kind": "length", "basic_size": "65.1"},
+            "raw_text": "65.1",
+        },
+        {
+            "entity_id": "number_mark",
+            "bbox": [100, 100, 160, 130],
+            "fields": {"text": "11±0.1", "dim_kind": "length", "basic_size": "11", "tolerance": "0.1"},
+            "raw_text": "11±0.1",
+        },
+        {"entity_id": "main_table", "bbox": [1100, 1100, 2000, 1400], "fields": {}},
+    ]
+    out, dropped = sanitize_number_mark_instances(
+        instances,
+        page_w=2048,
+        page_h=1448,
+        allowed_field_names=["text", "dim_kind", "basic_size", "tolerance", "has_tolerance", "angle"],
+        exclude_bboxes=[[1100, 1090, 2000, 1400]],
+    )
+    assert dropped >= 2
+    marks = [i for i in out if i.get("entity_id") == "number_mark"]
+    assert len(marks) == 1
+    assert marks[0]["raw_text"] == "11±0.1"
+    assert any(i.get("entity_id") == "main_table" for i in out)
 
 
 def test_vlm_filter_accepts_and_rejects(tmp_path: Path):
-    img = Image.new("RGB", (200, 120), (255, 255, 255))
+    img = Image.new("RGB", (800, 400), (255, 255, 255))
     path = tmp_path / "p.png"
     img.save(path)
 
     candidates = [
         {
             "entity_id": "number_mark",
-            "bbox": [10, 10, 60, 30],
+            "bbox": [20, 20, 70, 45],
             "raw_text": "R2",
             "fields": {"text": "R2", "dim_kind": "radius", "basic_size": "2"},
             "confidence": 0.9,
         },
         {
             "entity_id": "number_mark",
-            "bbox": [10, 50, 90, 70],
+            "bbox": [20, 80, 90, 105],
             "raw_text": "noise",
             "fields": {"text": "noise", "dim_kind": "length", "basic_size": "1"},
             "confidence": 0.8,
@@ -107,6 +206,9 @@ def test_vlm_filter_accepts_and_rejects(tmp_path: Path):
         "strict_fields_only": True,
         "require_dim_kind": True,
         "require_basic_size": True,
+        "max_bbox_width_ratio": 0.22,
+        "max_bbox_height_ratio": 0.12,
+        "max_bbox_area_ratio": 0.035,
         "fields": [
             {"name": "text"},
             {"name": "dim_kind"},
@@ -154,7 +256,7 @@ def test_vlm_filter_accepts_and_rejects(tmp_path: Path):
         path,
         candidates,
         ent,
-        meta={"width": 200, "height": 120},
+        meta={"width": 800, "height": 400},
         notes=notes,
         generate_fn=gen,
     )

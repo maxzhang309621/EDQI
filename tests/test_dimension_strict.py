@@ -29,11 +29,19 @@ def test_reject_non_dimension_and_part_no():
     assert not is_valid_dimension_mark({"text": "25001745002A", "dim_kind": "length", "basic_size": "25001745002"})
     assert not is_valid_dimension_mark({"text": "Siemens 2025", "dim_kind": None, "basic_size": None})
     assert not is_valid_dimension_mark({"text": "abc", "dim_kind": None})
+    assert not is_valid_dimension_mark({"text": "Rz5", "dim_kind": "radius", "basic_size": "5"})
+    assert not is_valid_dimension_mark({"text": "A", "dim_kind": "diameter", "basic_size": "A"})
+    assert not is_valid_dimension_mark({"text": "7295.9", "dim_kind": "length", "basic_size": "7295.9"})
+    assert not is_valid_dimension_mark({"text": "(5)", "dim_kind": "length", "basic_size": "5"})
+    assert not is_valid_dimension_mark({"text": "+0.2", "dim_kind": "length", "basic_size": "0.2"})
 
 
 def test_reject_wide_bbox():
     assert bbox_geometry_ok([10, 10, 40, 30], page_w=2048, page_h=1448)
     assert not bbox_geometry_ok([1024, 100, 2048, 140], page_w=2048, page_h=1448)
+    # 分块级半页假框
+    assert not bbox_geometry_ok([1024, 0, 2048, 1169], page_w=2048, page_h=1448)
+    assert not bbox_geometry_ok([0, 1024, 1280, 1169], page_w=2048, page_h=1448)
 
 
 def test_finalize_drops_invalid():

@@ -236,15 +236,18 @@ def _dimension_marks_pass2_prompt(ent: dict[str, Any]) -> str:
     field_desc = json_fields(ent)
     allow_s = ", ".join(allowed) if allowed else "text, dim_kind, basic_size, tolerance, has_tolerance, angle"
     return (
-        "严格读取该局部图中的工程尺寸标注属性。只输出 JSON。\n"
+        "严格判定该局部图是否为工程尺寸标注。只输出 JSON。\n"
         f"fields 只允许这些键（不得增删）: {allow_s}\n"
-        "若不是尺寸标注（图号/材料/标题栏/表格字等），全部字段填 null，raw_text=\"\"。\n"
+        "若不是尺寸标注，全部字段填 null，raw_text=\"\"（宁缺毋滥）。\n"
         f"字段说明: {field_desc}\n"
         "规则:\n"
+        "- 仅接受 Ø/⌀/Φ 直径、R 半径（R 后直接跟数字，如 R2/R40）、长度数值、角度°、以及带 ± 公差的尺寸；\n"
+        "- 一律拒绝：表面粗糙度(Rz/Ra/Rh)、视图字母(A/B)、气泡序号、图号、材料/表格数值、"
+        "标题栏文字、残片(+0.2/1./单独小数)、任何非尺寸文本；\n"
         "- dim_kind 只能是 diameter|radius|length|angle，否则 null；\n"
         "- basic_size=基本尺寸；tolerance=公差（无则 null）；has_tolerance 为布尔；\n"
         "- angle=相对水平线朝向角（度）；\n"
-        "- 禁止输出未声明字段，禁止编造。\n"
+        "- 禁止输出未声明字段，禁止编造，禁止把非尺寸硬套成 length。\n"
         "格式: {\"fields\":{...},\"raw_text\":\"...\"}"
     )
 
@@ -334,12 +337,19 @@ def filter_ocr_dimension_candidates_with_vlm(
             if not isinstance(fields, dict):
                 fields = {}
             raw_text = str(parsed.get("raw_text") or "") if isinstance(parsed, dict) else ""
-            text_v = str(fields.get("text") or raw_text or ocr_text or "")
+            # 严格：以 VLM 判定为准；VLM 判空则拒绝，不再用 OCR 文本回填“救活”
+            vlm_text = str(fields.get("text") or raw_text or "").strip()
+            vlm_kind = str(fields.get("dim_kind") or "").strip().lower()
+            if vlm_kind in {"", "null", "none"}:
+                vlm_kind = ""
+            if not vlm_text and not vlm_kind:
+                rejected += 1
+                continue
+            text_v = vlm_text or ocr_text
             fields = enrich_dimension_fields_from_text(fields, text_v, bbox=bbox)
             if flags["strict"]:
                 fields = clip_fields_to_schema(fields, allowed)
-            fields["ocr_prescreen"] = True
-            fields["vlm_filtered"] = True
+            # 再次确认：声明字段外的杂讯已裁掉后，仍须是合法尺寸
             if not is_valid_dimension_mark(
                 fields,
                 text=text_v,
@@ -348,6 +358,19 @@ def filter_ocr_dimension_candidates_with_vlm(
             ):
                 rejected += 1
                 continue
+            if not bbox_geometry_ok(
+                bbox,
+                page_w=width,
+                page_h=height,
+                max_width_ratio=flags["max_bbox_width_ratio"],
+                max_aspect_ratio=flags["max_aspect_ratio"],
+                max_height_ratio=float(ent.get("max_bbox_height_ratio", 0.12)),
+                max_area_ratio=float(ent.get("max_bbox_area_ratio", 0.035)),
+            ):
+                rejected += 1
+                continue
+            fields["ocr_prescreen"] = True
+            fields["vlm_filtered"] = True
             out = dict(inst)
             out["fields"] = fields
             out["raw_text"] = text_v or out.get("raw_text") or ""
@@ -371,8 +394,10 @@ def _dimension_ent_strict_flags(ent: dict[str, Any]) -> dict[str, Any]:
         "require_dim_kind": bool(ent.get("require_dim_kind", True)),
         "require_basic_size": bool(ent.get("require_basic_size", True)),
         "exclude_table_regions": bool(ent.get("exclude_table_regions", True)),
-        "max_bbox_width_ratio": float(ent.get("max_bbox_width_ratio", 0.28)),
+        "max_bbox_width_ratio": float(ent.get("max_bbox_width_ratio", 0.22)),
         "max_aspect_ratio": float(ent.get("max_aspect_ratio", 8.0)),
+        "max_bbox_height_ratio": float(ent.get("max_bbox_height_ratio", 0.12)),
+        "max_bbox_area_ratio": float(ent.get("max_bbox_area_ratio", 0.035)),
     }
 
 
@@ -427,6 +452,8 @@ def _finalize_dimension_instances(
             page_h=page_h,
             max_width_ratio=flags["max_bbox_width_ratio"],
             max_aspect_ratio=flags["max_aspect_ratio"],
+            max_height_ratio=flags["max_bbox_height_ratio"],
+            max_area_ratio=flags["max_bbox_area_ratio"],
         ):
             dropped += 1
             continue

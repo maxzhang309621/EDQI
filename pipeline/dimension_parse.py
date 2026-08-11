@@ -184,7 +184,7 @@ def is_valid_dimension_mark(
     require_dim_kind: bool = True,
     require_basic_size: bool = True,
 ) -> bool:
-    """是否为配置允许的尺寸属性（非图号/材料等杂讯）。"""
+    """是否为配置允许的尺寸属性（非图号/材料/粗糙度/表值等杂讯）。"""
     f = fields or {}
     text_v = str(text if text is not None else f.get("text") or "").strip()
     kind = str(f.get("dim_kind") or "").strip().lower() or None
@@ -193,6 +193,20 @@ def is_valid_dimension_mark(
     basic = f.get("basic_size")
     if basic is not None:
         basic = str(basic).strip() or None
+
+    if not text_v or text_v in {".", "——", "-", "–", "—"}:
+        return False
+    # 表面粗糙度 / 视图字母 / 气泡序号 / 残片
+    if re.match(r"(?i)^R[azhcf]\d", text_v):
+        return False
+    if re.fullmatch(r"[A-Za-z]{1,2}", text_v):
+        return False
+    if re.fullmatch(r"\(\d+\)", text_v):
+        return False
+    if re.fullmatch(r"[+]?\d+\.$", text_v) or re.fullmatch(r"[±+\-]\s*\d+(?:[.,]\d+)?", text_v):
+        return False
+    if re.search(r"(?i)图中无|无尺寸|not\s*a\s*dim", text_v):
+        return False
 
     if require_dim_kind and kind not in _ALLOWED_DIM_KINDS:
         # 尝试从文本再解析一次
@@ -214,6 +228,15 @@ def is_valid_dimension_mark(
         return False
     if re.match(r"^\d{7,}", text_v) and kind == "length" and "±" not in text_v and "°" not in text_v:
         return False
+    # 表格体积/重量量级：无公差的超大长度值
+    try:
+        basic_f = float(str(basic).replace(",", "."))
+        if kind == "length" and basic_f >= 1000 and "±" not in text_v and "°" not in text_v:
+            return False
+    except (TypeError, ValueError):
+        # basic 非数字（如误读成字母）
+        if kind in {"length", "diameter", "radius", "angle"} and not re.search(r"\d", str(basic or "")):
+            return False
     return True
 
 
@@ -222,11 +245,14 @@ def bbox_geometry_ok(
     *,
     page_w: int,
     page_h: int,
-    max_width_ratio: float = 0.28,
+    max_width_ratio: float = 0.22,
     max_aspect_ratio: float = 8.0,
     min_side: float = 4.0,
+    max_height_ratio: float = 0.12,
+    max_area_ratio: float = 0.035,
+    max_side_ratio: float = 0.22,
 ) -> bool:
-    """过滤整幅/半幅细长假框。"""
+    """过滤整幅/半幅/分块级假框（仅允许紧贴尺寸文字的小框）。"""
     if not bbox or len(bbox) != 4:
         return False
     try:
@@ -239,10 +265,17 @@ def bbox_geometry_ok(
     pw, ph = max(1, int(page_w)), max(1, int(page_h))
     if bw > max_width_ratio * pw:
         return False
-    if bh > 0.35 * ph:
+    if bh > max_height_ratio * ph:
+        return False
+    if max(bw, bh) > max_side_ratio * max(pw, ph):
+        return False
+    if (bw * bh) > max_area_ratio * pw * ph:
         return False
     ar = bw / max(bh, 1.0)
     if ar > max_aspect_ratio:
+        return False
+    # 竖排允许较高，但高宽比也受限
+    if bh / max(bw, 1.0) > max_aspect_ratio:
         return False
     return True
 
@@ -254,14 +287,25 @@ def prescreen_ocr_dimension_candidates(
     page_h: int,
     require_dim_kind: bool = True,
     require_basic_size: bool = True,
-    max_bbox_width_ratio: float = 0.28,
+    max_bbox_width_ratio: float = 0.22,
     max_aspect_ratio: float = 8.0,
+    max_height_ratio: float = 0.12,
+    max_area_ratio: float = 0.035,
     max_candidates: int | None = None,
+    exclude_bboxes: list[list[Any]] | None = None,
+    exclude_pad: float = 0.0,
+    exclude_table_texts: set[str] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], int]:
     """OCR 属性初筛：保留 keep_pair；非重叠实例按尺寸规则过滤后作为 VLM 候选。
 
     返回 (candidates, keep_pairs, dropped_non_pair)。
     """
+    from pipeline.perceive_common import (
+        bbox_center_xy,
+        point_in_bbox,
+        text_matches_table_value,
+    )
+
     keep_pairs: list[dict[str, Any]] = []
     candidates: list[dict[str, Any]] = []
     dropped = 0
@@ -269,6 +313,18 @@ def prescreen_ocr_dimension_candidates(
         if not isinstance(inst, dict):
             continue
         if inst.get("keep_pair"):
+            # 重叠证据也丢弃半页级假框，避免污染可视化
+            if not bbox_geometry_ok(
+                inst.get("bbox"),
+                page_w=page_w,
+                page_h=page_h,
+                max_width_ratio=max(max_bbox_width_ratio, 0.35),
+                max_aspect_ratio=max(max_aspect_ratio, 12.0),
+                max_height_ratio=0.25,
+                max_area_ratio=0.08,
+            ):
+                dropped += 1
+                continue
             keep_pairs.append(inst)
             continue
         fields = dict(inst.get("fields") or {})
@@ -280,7 +336,20 @@ def prescreen_ocr_dimension_candidates(
             page_h=page_h,
             max_width_ratio=max_bbox_width_ratio,
             max_aspect_ratio=max_aspect_ratio,
+            max_height_ratio=max_height_ratio,
+            max_area_ratio=max_area_ratio,
         ):
+            dropped += 1
+            continue
+        if exclude_bboxes:
+            center = bbox_center_xy(inst.get("bbox") or [])
+            if center and any(
+                point_in_bbox(center[0], center[1], bb, pad=float(exclude_pad))
+                for bb in exclude_bboxes
+            ):
+                dropped += 1
+                continue
+        if exclude_table_texts and text_matches_table_value(text_v, exclude_table_texts):
             dropped += 1
             continue
         if not is_valid_dimension_mark(
@@ -310,3 +379,84 @@ def prescreen_ocr_dimension_candidates(
         candidates = [c for i, c in enumerate(candidates) if i in keep_idx]
 
     return candidates, keep_pairs, dropped
+
+
+def sanitize_number_mark_instances(
+    instances: list[dict[str, Any]],
+    *,
+    page_w: int,
+    page_h: int,
+    allowed_field_names: list[str] | set[str] | frozenset[str] | None = None,
+    require_dim_kind: bool = True,
+    require_basic_size: bool = True,
+    max_bbox_width_ratio: float = 0.22,
+    max_aspect_ratio: float = 8.0,
+    max_height_ratio: float = 0.12,
+    max_area_ratio: float = 0.035,
+    exclude_bboxes: list[list[Any]] | None = None,
+    exclude_pad: float = 0.0,
+    exclude_table_texts: set[str] | None = None,
+) -> tuple[list[dict[str, Any]], int]:
+    """最终清理：非 keep_pair 的 number_mark 必须是合法尺寸小框；大范围假框一律丢弃。"""
+    from pipeline.perceive_common import bbox_center_xy, point_in_bbox, text_matches_table_value
+
+    mark_ids = {"number_mark", "annotation", "annotations"}
+    kept: list[dict[str, Any]] = []
+    dropped = 0
+    for inst in instances or []:
+        if not isinstance(inst, dict):
+            continue
+        eid = str(inst.get("entity_id") or "")
+        if eid not in mark_ids:
+            kept.append(inst)
+            continue
+
+        geom_ok = bbox_geometry_ok(
+            inst.get("bbox"),
+            page_w=page_w,
+            page_h=page_h,
+            max_width_ratio=max_bbox_width_ratio if not inst.get("keep_pair") else max(max_bbox_width_ratio, 0.35),
+            max_aspect_ratio=max_aspect_ratio if not inst.get("keep_pair") else max(max_aspect_ratio, 12.0),
+            max_height_ratio=max_height_ratio if not inst.get("keep_pair") else 0.25,
+            max_area_ratio=max_area_ratio if not inst.get("keep_pair") else 0.08,
+        )
+        if not geom_ok:
+            dropped += 1
+            continue
+
+        if inst.get("keep_pair"):
+            kept.append(inst)
+            continue
+
+        fields = dict(inst.get("fields") or {})
+        text_v = str(inst.get("raw_text") or fields.get("text") or "")
+        if exclude_bboxes:
+            center = bbox_center_xy(inst.get("bbox") or [])
+            if center and any(
+                point_in_bbox(center[0], center[1], bb, pad=float(exclude_pad))
+                for bb in exclude_bboxes
+            ):
+                dropped += 1
+                continue
+        if exclude_table_texts and text_matches_table_value(text_v, exclude_table_texts):
+            dropped += 1
+            continue
+        fields = enrich_dimension_fields_from_text(fields, text_v, bbox=inst.get("bbox"))
+        if allowed_field_names:
+            fields = clip_fields_to_schema(fields, allowed_field_names)
+        if not is_valid_dimension_mark(
+            fields,
+            text=text_v,
+            require_dim_kind=require_dim_kind,
+            require_basic_size=require_basic_size,
+        ):
+            dropped += 1
+            continue
+        out = dict(inst)
+        out["fields"] = fields
+        if fields.get("text"):
+            out["raw_text"] = fields.get("text")
+        if fields.get("angle") is not None:
+            out["angle"] = fields.get("angle")
+        kept.append(out)
+    return kept, dropped

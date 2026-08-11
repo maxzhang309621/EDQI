@@ -42,7 +42,10 @@ objects:
     strict_fields_only: true
     require_dim_kind: true
     require_basic_size: true
-    max_bbox_width_ratio: 0.28
+    # 抑制半页/分块级 number_mark 假框
+    max_bbox_width_ratio: 0.22
+    max_bbox_height_ratio: 0.12
+    max_bbox_area_ratio: 0.035
     max_aspect_ratio: 8.0
     vlm_filter_max_candidates: 48
     vlm_filter_crop_expand: 0.12
