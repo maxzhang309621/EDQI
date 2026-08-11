@@ -95,17 +95,34 @@ EDQI/
 | 用途 | 配置键 | 本地目录 | HF |
 |------|--------|----------|-----|
 | 规则拆解 | `models.qwen3_text` | `models/Qwen3-8B` | `Qwen/Qwen3-8B` |
-| 主路径 VLM | `models.qwen3_vl` | `models/Qwen3-VL-8B-Instruct` | `Qwen/Qwen3-VL-8B-Instruct` |
+| 主路径 VLM（默认，约 8GB 显存） | `models.qwen3_vl` | `models/Qwen3-VL-2B-Instruct` | `Qwen/Qwen3-VL-2B-Instruct` |
 | 备选定位 | `models.locateanything` | `models/LocateAnything-3B` | `nvidia/LocateAnything-3B` |
 
 ```bash
 pip install "transformers>=4.57.0" torch accelerate qwen-vl-utils huggingface_hub
 
+# 推荐：轻量 VLM（Qwen3-VL-2B-Instruct，适配约 8GB 显存）
 python tools/download_models.py qwen3_vl
+# 等价 huggingface-cli：
+# huggingface-cli download Qwen/Qwen3-VL-2B-Instruct --local-dir models/Qwen3-VL-2B-Instruct
+
 python tools/download_models.py qwen3_text
 python tools/download_models.py locateanything
 # 或一次性: python tools/download_models.py all
 ```
+
+国内可用 ModelScope：
+
+```bash
+python tools/download_models.py qwen3_vl --source modelscope
+```
+
+显存更充足时可改用更大 VLM（需同步改 `configs/default.yaml` 的 `path` / `hf_id`）：
+
+| 型号 | HF | 说明 |
+|------|-----|------|
+| Qwen3-VL-4B-Instruct | `Qwen/Qwen3-VL-4B-Instruct` | 质量更好，8GB 建议量化 |
+| Qwen3-VL-8B-Instruct | `Qwen/Qwen3-VL-8B-Instruct` | 原默认大模型，约需 16GB+ |
 
 权重就绪后，改配置：
 

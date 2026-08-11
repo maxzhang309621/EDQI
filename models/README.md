@@ -4,9 +4,13 @@
 #   python tools/download_models.py qwen3_text
 #   -> models/Qwen3-8B/
 #
-# Qwen3-VL-8B-Instruct（主路径感知）:
+# Qwen3-VL-2B-Instruct（主路径感知，默认，约 8GB 显存）:
 #   python tools/download_models.py qwen3_vl
-#   -> models/Qwen3-VL-8B-Instruct/
+#   huggingface-cli download Qwen/Qwen3-VL-2B-Instruct --local-dir models/Qwen3-VL-2B-Instruct
+#   -> models/Qwen3-VL-2B-Instruct/
+#
+# 更大 VLM（需改 configs/default.yaml 的 path/hf_id）:
+#   Qwen/Qwen3-VL-4B-Instruct / Qwen/Qwen3-VL-8B-Instruct
 #
 # LocateAnything-3B（备选定位）:
 #   python tools/download_models.py locateanything
