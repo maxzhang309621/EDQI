@@ -1,0 +1,16 @@
+{
+  "instances": [
+    {
+      "entity_id": "title_block",
+      "bbox": [660, 637, 1176, 833],
+      "fields": {
+        "part_no": null,
+        "material": "45钢",
+        "name": null
+      },
+      "raw_text": "材料 45钢",
+      "confidence": 0.7,
+      "needs_review": true
+    }
+  ]
+}

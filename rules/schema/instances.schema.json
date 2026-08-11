@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://edqi.local/schemas/instances.schema.json",
+  "title": "EDQI Perception Instances",
+  "type": "object",
+  "required": ["backend", "instances"],
+  "properties": {
+    "backend": {
+      "type": "string",
+      "enum": ["qwen_vl", "locateanything_ocr", "hybrid", "mock"]
+    },
+    "instances": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["entity_id", "instance_id", "label", "bbox", "fields"],
+        "properties": {
+          "entity_id": { "type": "string" },
+          "instance_id": { "type": "string" },
+          "label": { "type": "string" },
+          "bbox": {
+            "type": "array",
+            "minItems": 4,
+            "maxItems": 4,
+            "items": { "type": "number" }
+          },
+          "fields": { "type": "object" },
+          "raw_text": { "type": "string" },
+          "confidence": { "type": "number" },
+          "needs_review": { "type": "boolean" }
+        }
+      }
+    }
+  }
+}

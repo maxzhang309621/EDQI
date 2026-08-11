@@ -1,0 +1,18 @@
+{
+  "rule_id": "TB_PART_NO_REQUIRED",
+  "name": "标题栏必须有图号",
+  "severity": "error",
+  "status": "active",
+  "version": 1,
+  "entities": [
+    {
+      "entity_id": "title_block",
+      "locate_query": "标题栏",
+      "fields": [
+        {"name": "part_no", "parse_hint": "图号", "required": true}
+      ]
+    }
+  ],
+  "logic": {"op": "not_empty", "path": "title_block.part_no"},
+  "message": "标题栏缺少图号"
+}

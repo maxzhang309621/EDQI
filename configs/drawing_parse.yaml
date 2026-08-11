@@ -1,0 +1,173 @@
+# 工程图信息解析目标（用户可改）
+# 与质检规则分离：规则只管判定，本文件只管「要抽哪些数据」
+# 仅对下方显式定义的字段做 VLM 抽取；未列出的字段/区域一律不识别
+#
+# 表格分部（以 Product 字段所在行为硬分界）：
+# - material_table：Product 行以上；OCR 先定位字段标签，再读标签正上方同列单元格（无文本→null）；多格用数组
+# - main_table：Product 行及其以下；VL 只读标签对应「单元格内」内容
+
+version: 1
+
+# true=仅用 drawing_parse 计划（不合并规则库实体）；false=与规则双后端合并
+# 非表格尺寸标注见下方 objects（与 NUM_TEXT_NO_OVERLAP 重叠检测解耦）
+# 也可在 configs/default.yaml 的 drawing_parse.tables_only 设置（二者任一为 true 即生效）
+tables_only: false
+
+# ---------- 非表格：区域/对象 ----------
+# parse_kind=dimension_marks：尺寸标注属性（Ø/R/长度/° + 基本尺寸/公差）
+# backend=vlm（默认）：走 Qwen-VL，与数字重叠 OCR 独立；backend=ocr 可回退旧路径
+objects:
+  - enabled: true
+    entity_id: number_mark
+    parse_kind: dimension_marks
+    backend: vlm
+    locate_query: 图中尺寸数字或数值标注（Ø直径 / R半径 / 长度 / °角度）；排除标题栏/图号/材料牌号
+    cardinality: many
+    # false=属性路径不做墨迹重叠配对；规则启用 NUM_TEXT_NO_OVERLAP 时重叠仍走独立 OCR
+    detect_overlap: false
+    # 仅 backend=ocr 时生效（不影响 perception.number_overlap）
+    ocr_angle_adapt: true
+    ocr_angle_adapt_step: 15
+    ocr_angle_adapt_min_count: 2
+    ocr_angle_adapt_max_extra: 4
+    ocr_deskew_reread: true
+    ocr_deskew_min_angle: 8
+    # backend=ocr 时：用 tables 定位框剔除框内数字；vlm 路径由提示词排除表格区
+    exclude_table_regions: true
+    exclude_table_pad: 2
+    exclude_table_expand_up: 0.12
+    fields:
+      - name: text
+        parse_hint: 尺寸标注可见原文
+        required: false
+      - name: angle
+        parse_hint: 文本相对水平线的朝向角（度，水平≈0，竖排≈±90）
+        required: false
+      - name: dim_kind
+        parse_hint: diameter|radius|length|angle
+        required: false
+      - name: basic_size
+        parse_hint: 基本尺寸（± 前；无 ± 则为整段数值）
+        required: false
+      - name: tolerance
+        parse_hint: 公差（± 后；无则为 null）
+        required: false
+      - name: has_tolerance
+        parse_hint: 是否标明公差（布尔）
+        required: false
+
+# ---------- 表格：列表形式，物料表 + 主表分部解析 ----------
+tables:
+  # ----- 上方：物料表 -----
+  - enabled: true
+    entity_id: material_table
+    section: material
+    locate_query: >-
+      图纸右下图框内、Product 字段行以上的物料/材料参数小表
+      （含 Article no.、Material designation、Volume、Surface、Weight/Mass 等；下界止于 Product 行上沿）
+    cardinality: one
+    crop_expand: 0.05
+    max_new_tokens: 3072
+    extract_all_pairs: false
+    # 标签在下，取值在该列上方单元格；多格 → 数组（实现：OCR 定标签再读上方）
+    read_mode: above_cells
+    value_as_array: true
+    # 仅物料表小字 OCR 增强；不影响 perception.number_overlap / models.ocr
+    # crop_pad=只扩 OCR 读区（不改结果图上的表格框）
+    ocr_enhance:
+      scale: 4.0
+      border: 20
+      contrast: 1.8
+      crop_pad: 16
+      confidence_threshold: 0.28
+    fields:
+      - name: article_no
+        parse_hint: "Article no. / Article No. / Article number"
+        required: false
+      - name: material_designation
+        parse_hint: "Material designation / Material / -sheet"
+        required: false
+      - name: additional_material_information
+        parse_hint: "Additional material information / Additional material info"
+        required: false
+      - name: volume
+        parse_hint: "Volume / VOLUME"
+        required: false
+      - name: surface
+        parse_hint: "Surface / SURFACE"
+        required: false
+      - name: weight
+        parse_hint: "Weight / Mass / MASS"
+        required: false
+
+  # ----- 下方：主表（含 Product 行）-----
+  - enabled: true
+    entity_id: main_table
+    section: main
+    locate_query: >-
+      图纸右下图框内、从 Product 字段行起及其以下的主标题栏/图框大表
+      （含 Product、Document number、Page、Scale、Revision、Tolerance、Created by 等）
+    cardinality: one
+    crop_expand: 0.2
+    max_new_tokens: 4096
+    extract_all_pairs: false
+    # 只读标签对应单元格内（或紧邻取值格内）文字，禁止取上方物料表内容
+    read_mode: cell_content
+    value_as_array: false
+    fields:
+      - name: component_name
+        # 无字段标签：靠主表中部偏大单元格的位置与面积判断
+        locate_by: size_position
+        parse_hint: >-
+          主表中部面积较大的单元格内文字，表示图纸部件名/零件名称
+          无 Article/Document/Tolerance 等标签，
+          勿与 Created by、Surface/Finish、Document Subclass 混淆
+        required: false
+      - name: restricted_substances
+        parse_hint: "Restricted substances in accordance with / Restricted substances"
+        required: false
+      - name: tolerance_1
+        parse_hint: "Tolerance 1"
+        required: false
+      - name: tolerance_2
+        parse_hint: "Tolerance 2"
+        required: false
+      - name: surface_treatment
+        parse_hint: "Surface Treatment"
+        required: false
+      - name: surface_finish_1
+        parse_hint: "Surface / Finish 1 / Surface/Finish 1"
+        required: false
+      - name: surface_finish_2
+        parse_hint: "Surface / Finish 2 / Surface/Finish 2"
+        required: false
+      - name: notes
+        parse_hint: "Notes / NOTE / 备注 / 注释"
+        required: false
+      - name: created_by
+        parse_hint: "Created by"
+        required: false
+      - name: approved_by
+        parse_hint: "Approved by"
+        required: false
+      - name: date
+        parse_hint: "Date / 日期"
+        required: false
+      - name: revision
+        parse_hint: "Revision / 修订"
+        required: false
+      - name: revision_state
+        parse_hint: "Revision State"
+        required: false
+      - name: document_number
+        parse_hint: "Document number / Document Number / Document No."
+        required: false
+      - name: document_subclass
+        parse_hint: "Document Subclass"
+        required: false
+      - name: page
+        parse_hint: "Page / 页码 / 页次"
+        required: false
+      - name: scale
+        parse_hint: "Scale / 比例"
+        required: false

@@ -1,0 +1,54 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://edqi.local/schemas/facts.schema.json",
+  "title": "EDQI Facts",
+  "type": "object",
+  "required": ["drawing_id", "meta"],
+  "additionalProperties": true,
+  "properties": {
+    "drawing_id": { "type": "string" },
+    "meta": {
+      "type": "object",
+      "required": ["width", "height"],
+      "properties": {
+        "width": { "type": "integer", "minimum": 1 },
+        "height": { "type": "integer", "minimum": 1 },
+        "page": { "type": "integer", "minimum": 1 },
+        "dpi": { "type": "number" },
+        "scale_to_vlm": { "type": "number" },
+        "source_path": { "type": "string" },
+        "perception_backend": { "type": "string" }
+      }
+    },
+    "title_block": {
+      "type": ["object", "null"],
+      "additionalProperties": true
+    },
+    "components": {
+      "type": "array",
+      "items": { "type": "object", "additionalProperties": true }
+    },
+    "features": {
+      "type": "array",
+      "items": { "type": "object", "additionalProperties": true }
+    },
+    "annotations": {
+      "type": "array",
+      "items": { "type": "object", "additionalProperties": true }
+    },
+    "datums": {
+      "type": "array",
+      "items": { "type": "object", "additionalProperties": true }
+    },
+    "tables": {
+      "type": "array",
+      "description": "表格解析结果（info_table）：具名字段 + pairs",
+      "items": { "type": "object", "additionalProperties": true }
+    },
+    "_instances": {
+      "type": "array",
+      "description": "原始感知 instances，便于排查",
+      "items": { "type": "object" }
+    }
+  }
+}

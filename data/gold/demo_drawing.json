@@ -1,0 +1,26 @@
+{
+  "drawing_id": "demo_drawing",
+  "image": "data/samples/demo_drawing.png",
+  "rule_set_id": "default",
+  "boxes": [
+    {
+      "entity_id": "title_block",
+      "bbox": [
+        660,
+        637,
+        1176,
+        833
+      ]
+    }
+  ],
+  "fields": [
+    {
+      "entity_id": "title_block",
+      "fields": {
+        "part_no": "A-1001",
+        "material": "45钢"
+      }
+    }
+  ],
+  "expected_rule_ids": []
+}

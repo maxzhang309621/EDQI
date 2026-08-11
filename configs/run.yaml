@@ -1,0 +1,35 @@
+# run 运行参数配置
+# 用法:
+#   python -m pipeline.run [--run-config configs/run.yaml]   # 单次进程（每次重载模型）
+#   python -m pipeline.worker [图纸...]                      # 常驻：预热一次后批跑/交互（推荐）
+# 命令行显式传入的参数优先于本文件
+
+# 图纸路径（可被位置参数覆盖；二者至少填一个）
+drawing: null
+# 例: data/input/test.pdf
+
+# 感知后端；null 表示使用 default.yaml 的 perception_backend
+# qwen_vl | locateanything_ocr | hybrid | mock | number_overlap | ocr_numbers
+backend: null
+
+# 规则集 / 仅跑指定规则（null=库中全部 active）
+rule_set_id: default
+rule_ids: null
+# 例:
+# rule_ids:
+#   - NUM_TEXT_NO_OVERLAP
+
+# PDF 页码（从 1 起）
+page: 1
+
+# 是否写入人工复核队列
+enqueue_review: true
+
+# 是否启用 drawing_parse.yaml 信息/表格解析
+drawing_parse: true
+
+# 仅表格 VLM（不合并数字重叠 OCR）；null 表示不覆盖 default/drawing_parse 中的 tables_only
+tables_only: false
+
+# 主工程配置（模型、路径、感知等）
+config: configs/default.yaml

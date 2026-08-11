@@ -1,0 +1,19 @@
+{
+  "drawing_id": "demo_missing_partno",
+  "image": "data/samples/demo_missing_partno.png",
+  "rule_set_id": "default",
+  "boxes": [
+    {"entity_id": "title_block", "bbox": [660, 637, 1176, 833]}
+  ],
+  "fields": [
+    {
+      "entity_id": "title_block",
+      "fields": {"part_no": null, "material": "45钢", "name": null}
+    }
+  ],
+  "expected_rule_ids": [
+    "TB_PART_NO_REQUIRED",
+    "TB_PART_NO_FORMAT",
+    "TB_NAME_REQUIRED"
+  ]
+}

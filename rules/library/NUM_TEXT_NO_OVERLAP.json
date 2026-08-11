@@ -1,0 +1,38 @@
+{
+  "rule_id": "NUM_TEXT_NO_OVERLAP",
+  "name": "数字标注不得重叠",
+  "severity": "error",
+  "status": "active",
+  "version": 5,
+  "updated_at": "2026-08-11T00:00:00+00:00",
+  "drawing_types": [
+    "part",
+    "assembly"
+  ],
+  "entities": [
+    {
+      "entity_id": "number_mark",
+      "locate_query": "图中尺寸数字或数值标注",
+      "cardinality": "many",
+      "fields": [
+        {
+          "name": "text",
+          "parse_hint": "数字文本",
+          "required": false
+        }
+      ]
+    }
+  ],
+  "logic": {
+    "op": "bbox_overlap_count_lte",
+    "path": "annotations",
+    "count": 0,
+    "iou_thr": 0.0,
+    "min_intersection": 1,
+    "min_overlap_ratio": 0.0,
+    "min_box_side": 8,
+    "only_keep_pair": true,
+    "ignore_horizontal_neighbors": false
+  },
+  "message": "检测到数字/数值标注墨迹重叠"
+}

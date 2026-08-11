@@ -1,0 +1,20 @@
+{
+  "rule_id": "COMP_COUNT_GTE_1",
+  "name": "至少存在一个元器件标注",
+  "severity": "warn",
+  "status": "active",
+  "version": 1,
+  "entities": [
+    {
+      "entity_id": "component",
+      "locate_query": "电阻或电容标注",
+      "cardinality": "many",
+      "fields": [
+        {"name": "id", "parse_hint": "位号", "required": false},
+        {"name": "value", "parse_hint": "阻值或容值", "required": false}
+      ]
+    }
+  ],
+  "logic": {"op": "count_gte", "path": "components", "count": 1},
+  "message": "未检测到元器件标注"
+}

@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://edqi.local/schemas/findings.schema.json",
+  "title": "EDQI Findings",
+  "type": "object",
+  "required": ["passed", "rule_set_id", "findings"],
+  "additionalProperties": true,
+  "properties": {
+    "passed": { "type": "boolean" },
+    "rule_set_id": { "type": "string" },
+    "rule_set_version": { "type": ["string", "integer", "null"] },
+    "perception_backend": { "type": "string" },
+    "drawing_id": { "type": "string" },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["rule_id", "severity", "message", "path"],
+        "properties": {
+          "rule_id": { "type": "string" },
+          "severity": { "type": "string", "enum": ["error", "warn", "info"] },
+          "message": { "type": "string" },
+          "path": { "type": "string" },
+          "actual": {},
+          "expected": {},
+          "evidence_bboxes": {
+            "type": "array",
+            "items": {
+              "type": "array",
+              "minItems": 4,
+              "maxItems": 4,
+              "items": { "type": "number" }
+            }
+          },
+          "related_ids": {
+            "type": "array",
+            "items": { "type": "string" }
+          }
+        }
+      }
+    }
+  }
+}

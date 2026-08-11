@@ -1,0 +1,29 @@
+{
+  "rule_id": "NEW_RULE_EDIT_ME",
+  "name": "标题栏图号不能为空",
+  "severity": "error",
+  "status": "draft",
+  "version": 1,
+  "updated_at": "2026-08-06T06:49:55.363578+00:00",
+  "entities": [
+    {
+      "entity_id": "title_block",
+      "locate_query": "标题栏",
+      "cardinality": "one",
+      "fields": [
+        {
+          "name": "part_no",
+          "parse_hint": "图号",
+          "required": true
+        }
+      ]
+    }
+  ],
+  "logic": {
+    "op": "not_empty",
+    "path": "title_block.part_no"
+  },
+  "message": "标题栏图号不能为空",
+  "_source_nl": "标题栏图号不能为空",
+  "_note": "本地权重未就绪(models/Qwen3-8B)，已生成离线模板。下载 Qwen/Qwen3-8B 后重跑可自动拆解。"
+}

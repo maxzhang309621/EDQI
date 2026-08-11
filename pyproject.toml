@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "edqi"
+version = "0.1.0"
+description = "工程制图 AI 质检"
+requires-python = ">=3.10"
+dependencies = [
+  "Pillow>=10.0.0",
+  "PyYAML>=6.0",
+  "jsonschema>=4.20.0",
+  "numpy>=1.24.0,<2.4",
+  "pymupdf>=1.23.0",
+]
+
+[tool.setuptools.packages.find]
+include = ["pipeline*", "engines*"]

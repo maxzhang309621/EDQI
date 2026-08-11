@@ -1,0 +1,143 @@
+# EDQI 默认配置 — 本地权重路径可按需修改
+
+project_root: .
+
+# run 运行参数（图纸、backend、页码等）；可被 CLI 覆盖
+run_config: configs/run.yaml
+
+# 感知后端: qwen_vl | locateanything_ocr | hybrid | mock
+perception_backend: qwen_vl
+
+# 感知硬化：缓存 / 分块
+perception:
+  cache_enabled: true
+  cache_dir: work_dirs/cache/perception
+  tile_enabled: true
+  tile_size: 1280
+  tile_overlap: 0.2
+  tile_dir: work_dirs/cache/tiles
+  nms_iou: 0.5
+  # 仅跑数字重叠规则时，即使 --backend qwen_vl 也自动切到 OCR 多框
+  auto_number_overlap_backend: true
+  number_overlap:
+    confidence_threshold: 0.35
+    tile_enabled: false
+    dedupe_iou: 0.88
+    min_box_side: 8
+    min_ink_pixels: 20
+    min_ink_ratio: 0.06
+    ocr_angles: [0, 90, -90]
+    # 大图分块 OCR：补全图漏检的局部叠印
+    tile_ocr_enabled: true
+    tile_ocr_min_side: 900
+    tile_size: 768
+    tile_overlap: 0.25
+    fused_enabled: true
+    fused_junc_per_skel: 0.72
+    fused_edge_density: 0.29
+    fused_ink_per_skel_max: 1.50
+    fused_blob_scan: true
+
+# 模型本地路径（下载权重后填入 / 放到对应目录即可）
+models:
+  # 文本 LLM：规则拆解 S1
+  qwen3_text:
+    path: models/Qwen3-8B
+    hf_id: Qwen/Qwen3-8B
+    # 显存紧可用: Qwen/Qwen3-4B
+    device: auto
+    dtype: auto
+    enable_thinking: false
+    max_new_tokens: 2048
+
+  # 主路径 VLM：定位 + 字段解析
+  qwen3_vl:
+    path: models/Qwen3-VL-8B-Instruct
+    hf_id: Qwen/Qwen3-VL-8B-Instruct
+    # 更小: Qwen/Qwen3-VL-2B-Instruct
+    device: auto
+    dtype: auto
+    max_new_tokens: 2048
+    # Pass1 定位专用（过长易截断 → 解析失败 → tables 全空）
+    locate_max_new_tokens: 768
+    # 坐标规范: qwen 常用 0-1000
+    coord_norm: 1000
+    two_pass: true
+    crop_expand: 0.15
+
+  # 备选定位：LocateAnything
+  locateanything:
+    path: models/LocateAnything-3B
+    hf_id: nvidia/LocateAnything-3B
+    device: cuda
+    dtype: bfloat16
+    generation_mode: hybrid
+
+  # 备选 OCR（Python 3.13 推荐 rapidocr_onnxruntime）
+  ocr:
+    backend: rapidocr_onnxruntime  # rapidocr_onnxruntime | rapidocr | paddleocr
+    confidence_threshold: 0.5
+
+# 图纸接入
+ingest:
+  max_side: 2048
+  dpi: 200
+  output_dir: work_dirs/ingest
+
+# 规则库（质检判定；解析目标见 drawing_parse_config）
+rules:
+  library_dir: rules/library
+  drafts_dir: rules/drafts
+  schema_dir: rules/schema
+  fewshot_dir: rules/fewshot
+  only_active: true
+
+# 工程图信息解析目标（表格 / 非表格分区，与规则解耦）
+drawing_parse_config: configs/drawing_parse.yaml
+drawing_parse:
+  enabled: true
+  # true=仅跑表格 VLM，不合并数字重叠 OCR（facts 中无 annotations）
+  tables_only: false
+
+# 同时存在数字重叠实体与 VL 解析实体时，自动双后端合并
+perception_dual_backend: true
+
+# 输出
+work_dirs:
+  facts: work_dirs/facts
+  vis: work_dirs/vis
+  reports: work_dirs/reports
+
+# Findings 人工复核队列
+review:
+  auto_enqueue: true
+  enqueue_warn: true
+  queue_dir: work_dirs/review_queue
+
+# 可视化
+render:
+  box_width: 3
+  # true=在结果标注图上叠加表格识别 bbox（material/main 等）
+  show_table_boxes: true
+  table_box_width: 3
+  table_label: true
+  # true=可视化已识别的尺寸属性（text/dim_kind/basic_size/tolerance/angle）
+  show_attribute_boxes: true
+  attribute_box_width: 2
+  attribute_label: true
+  attribute_font_size: 14
+  colors:
+    error: [220, 38, 38]
+    warn: [234, 88, 12]
+    info: [37, 99, 235]
+    # 表格识别框（show_table_boxes=true 时使用）
+    table_material: [16, 185, 129]   # 物料表
+    table_main: [59, 130, 246]        # 主表
+    table_other: [168, 85, 247]       # 其它表
+    # 属性框（show_attribute_boxes=true 时使用）
+    attribute: [14, 165, 233]         # 正常尺寸属性
+    attribute_overlap: [251, 146, 60] # 重叠/跳过解析
+    attribute_diameter: [14, 165, 233]
+    attribute_radius: [20, 184, 166]
+    attribute_length: [59, 130, 246]
+    attribute_angle: [168, 85, 247]
