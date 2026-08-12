@@ -218,6 +218,33 @@ def enrich_dimension_fields_from_text(
 
 
 _ALLOWED_DIM_KINDS = frozenset({"diameter", "radius", "length", "angle"})
+# OCR 采信半径/长度；直径/角度依赖 Ø/°，须 VLM 确认（不改动数字重叠 OCR 参数）
+_OCR_OWNED_DIM_KINDS = frozenset({"radius", "length"})
+_VLM_OWNED_DIM_KINDS = frozenset({"diameter", "angle"})
+
+
+def is_ocr_owned_dim_kind(kind: str | None) -> bool:
+    return str(kind or "").strip().lower() in _OCR_OWNED_DIM_KINDS
+
+
+def is_vlm_owned_dim_kind(kind: str | None) -> bool:
+    return str(kind or "").strip().lower() in _VLM_OWNED_DIM_KINDS
+
+
+def is_bare_numeric_dimension_candidate(text: str) -> bool:
+    """无 Ø/R/° 的纯数值（含 ±），可送 VLM 看是否为直径/角度。"""
+    raw = (text or "").strip()
+    if not raw or has_non_dimension_word_prefix(raw):
+        return False
+    t = _normalize_text(raw)
+    if re.search(r"[Ø°]", t) or _RADIUS_PREFIX.match(t):
+        return False
+    if re.fullmatch(r"[±+\-]?\d+(?:[.,]\d+)?(?:\s*[±+\-]\s*\d+(?:[.,]\d+)?)?", t):
+        return True
+    if re.match(r"^[±+\-]?\d", t) and not re.search(r"[A-Za-z]{2,}", t):
+        parsed = parse_dimension_text(t)
+        return parsed.get("dim_kind") == "length" and bool(parsed.get("basic_size"))
+    return False
 
 
 def clip_fields_to_schema(
@@ -329,19 +356,22 @@ def bbox_geometry_ok(
     if bw < min_side or bh < min_side:
         return False
     pw, ph = max(1, int(page_w)), max(1, int(page_h))
-    if bw > max_width_ratio * pw:
+    vertical = bh >= 1.35 * bw
+    # 竖排尺寸允许更高，避免垂直标注被高度比误杀（与重叠 OCR 参数无关）
+    h_ratio = max_height_ratio * (2.2 if vertical else 1.0)
+    w_ratio = max_width_ratio * (1.0 if not vertical else 0.85)
+    if bw > w_ratio * pw:
         return False
-    if bh > max_height_ratio * ph:
+    if bh > h_ratio * ph:
         return False
-    if max(bw, bh) > max_side_ratio * max(pw, ph):
+    if max(bw, bh) > max_side_ratio * max(pw, ph) * (1.35 if vertical else 1.0):
         return False
-    if (bw * bh) > max_area_ratio * pw * ph:
+    if (bw * bh) > max_area_ratio * pw * ph * (1.5 if vertical else 1.0):
         return False
     ar = bw / max(bh, 1.0)
     if ar > max_aspect_ratio:
         return False
-    # 竖排允许较高，但高宽比也受限
-    if bh / max(bw, 1.0) > max_aspect_ratio:
+    if bh / max(bw, 1.0) > max_aspect_ratio * (1.25 if vertical else 1.0):
         return False
     return True
 
@@ -361,10 +391,11 @@ def prescreen_ocr_dimension_candidates(
     exclude_bboxes: list[list[Any]] | None = None,
     exclude_pad: float = 0.0,
     exclude_table_texts: set[str] | None = None,
+    ocr_accept_kinds: set[str] | frozenset[str] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], int]:
-    """OCR 属性初筛：保留 keep_pair；非重叠实例按尺寸规则过滤后作为 VLM 候选。
+    """OCR 初筛：radius/length 为 OCR 角色；diameter/angle（或裸数字升级）标为 VLM 角色。
 
-    返回 (candidates, keep_pairs, dropped_non_pair)。
+    不改动数字重叠 OCR 参数；仅做属性候选分流。
     """
     from pipeline.perceive_common import (
         bbox_center_xy,
@@ -372,6 +403,7 @@ def prescreen_ocr_dimension_candidates(
         text_matches_table_value,
     )
 
+    accept = set(ocr_accept_kinds) if ocr_accept_kinds is not None else set(_OCR_OWNED_DIM_KINDS)
     keep_pairs: list[dict[str, Any]] = []
     candidates: list[dict[str, Any]] = []
     dropped = 0
@@ -426,8 +458,19 @@ def prescreen_ocr_dimension_candidates(
         ):
             dropped += 1
             continue
+
+        kind = str(fields.get("dim_kind") or "").strip().lower()
+        # OCR 直接采信 radius/length；直径/角度或裸数字 → 送 VLM 认 Ø/°
+        if kind in accept:
+            role = "ocr_owned"
+        elif kind in _VLM_OWNED_DIM_KINDS or is_bare_numeric_dimension_candidate(text_v):
+            role = "vlm_symbol"
+        else:
+            dropped += 1
+            continue
+
         out = dict(inst)
-        out["fields"] = {**fields, "ocr_prescreen": True}
+        out["fields"] = {**fields, "ocr_prescreen": True, "ocr_role": role}
         if fields.get("text") and not out.get("raw_text"):
             out["raw_text"] = fields.get("text")
         if fields.get("angle") is not None:
@@ -462,10 +505,16 @@ def sanitize_number_mark_instances(
     exclude_bboxes: list[list[Any]] | None = None,
     exclude_pad: float = 0.0,
     exclude_table_texts: set[str] | None = None,
+    require_vlm_for_kinds: set[str] | frozenset[str] | None = None,
 ) -> tuple[list[dict[str, Any]], int]:
-    """最终清理：非 keep_pair 的 number_mark 必须是合法尺寸小框；大范围假框一律丢弃。"""
+    """最终清理：大范围假框丢弃；直径/角度默认必须经 VLM 确认。"""
     from pipeline.perceive_common import bbox_center_xy, point_in_bbox, text_matches_table_value
 
+    need_vlm = (
+        set(require_vlm_for_kinds)
+        if require_vlm_for_kinds is not None
+        else set(_VLM_OWNED_DIM_KINDS)
+    )
     mark_ids = {"number_mark", "annotation", "annotations"}
     kept: list[dict[str, Any]] = []
     dropped = 0
@@ -516,6 +565,10 @@ def sanitize_number_mark_instances(
             require_dim_kind=require_dim_kind,
             require_basic_size=require_basic_size,
         ):
+            dropped += 1
+            continue
+        kind = str(fields.get("dim_kind") or "").strip().lower()
+        if kind in need_vlm and not fields.get("vlm_filtered"):
             dropped += 1
             continue
         out = dict(inst)

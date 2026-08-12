@@ -183,6 +183,16 @@ def _normalize_dimension_marks_block(block: dict[str, Any]) -> dict[str, Any] | 
         "ocr_angle_adapt_max_extra": int(block.get("ocr_angle_adapt_max_extra", 4)),
         "ocr_deskew_reread": bool(block.get("ocr_deskew_reread", False)),
         "ocr_deskew_min_angle": float(block.get("ocr_deskew_min_angle", 8.0)),
+        "ocr_accept_kinds": [
+            str(k).strip().lower()
+            for k in (block.get("ocr_accept_kinds") or ["radius", "length"])
+            if str(k).strip()
+        ],
+        "vlm_require_kinds": [
+            str(k).strip().lower()
+            for k in (block.get("vlm_require_kinds") or ["diameter", "angle"])
+            if str(k).strip()
+        ],
         # 默认排除表格框内 OCR 数字（尺寸属性仅表格外）
         "exclude_table_regions": bool(block.get("exclude_table_regions", True)),
         "exclude_table_pad": float(block.get("exclude_table_pad", 2.0)),
