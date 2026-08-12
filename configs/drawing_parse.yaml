@@ -45,7 +45,9 @@ objects:
     # 尺寸属性排除表格框：vlm/ocr 均生效（框内数字不当尺寸）
     exclude_table_regions: true
     exclude_table_pad: 2
+    # OCR 路径：物料表 above_cells 上扩；VLM 几何排除默认 0（不上扩，避免误伤表上方尺寸）
     exclude_table_expand_up: 0.12
+    vlm_exclude_table_expand_up: 0
     # VLM 属性：不识别 OCR 已确认重叠（keep_pair）的文本区域
     exclude_overlap_pairs: true
     exclude_overlap_iou: 0.25

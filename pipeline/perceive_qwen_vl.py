@@ -452,7 +452,8 @@ def _filter_dimension_marks_in_table_regions(
         page_w=page_w,
         page_h=page_h,
         pad=float(ent0.get("exclude_table_pad", 2.0)),
-        expand_up_frac=float(ent0.get("exclude_table_expand_up", 0.12)),
+        # VLM：默认不上扩，避免「表格上方视图尺寸」被当成表内内容删掉
+        expand_up_frac=float(ent0.get("vlm_exclude_table_expand_up", 0.0)),
     )
     if not exclude_bbs:
         return instances

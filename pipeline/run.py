@@ -228,8 +228,10 @@ def perceive(
         page_h = int(meta.get("height") or 0)
         exclude_pad = float(dim_cfg.get("exclude_table_pad", 2.0))
         expand_up = float(dim_cfg.get("exclude_table_expand_up", 0.12))
+        vlm_expand_up = float(dim_cfg.get("vlm_exclude_table_expand_up", 0.0))
         # OCR 属性路径：按表格框过滤 OCR；VLM 属性路径：过滤 VLM 尺寸框 + 表格字段值
         if bool(dim_cfg.get("exclude_table_regions", True)):
+            # OCR 仍可用上扩（物料表 above_cells）；VLM 几何过滤单独建区
             exclude_bbs = build_table_exclude_regions(
                 vl_payload.get("instances") or [],
                 page_w=page_w,
@@ -243,9 +245,16 @@ def perceive(
             for e in vl_plan:
                 if str(e.get("parse_kind") or "").lower() == "dimension_marks" and e.get("entity_id"):
                     dim_eids.add(str(e["entity_id"]))
+            vlm_exclude_bbs = build_table_exclude_regions(
+                vl_payload.get("instances") or [],
+                page_w=page_w,
+                page_h=page_h,
+                pad=exclude_pad,
+                expand_up_frac=vlm_expand_up,
+            )
             vl_insts = list(vl_payload.get("instances") or [])
             vl_insts, drop_box = filter_instances_outside_bboxes(
-                vl_insts, exclude_bbs, pad=0.0, entity_ids=dim_eids
+                vl_insts, vlm_exclude_bbs, pad=0.0, entity_ids=dim_eids
             )
             vl_insts, drop_txt = filter_instances_matching_table_values(
                 vl_insts, table_tokens, entity_ids=dim_eids
