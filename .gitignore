@@ -45,6 +45,20 @@ work_dirs/**
 !work_dirs/**/
 !work_dirs/**/.gitkeep
 
+# 感知 / 分块缓存（显式再挡一层，避免误 add）
+work_dirs/cache/perception/
+work_dirs/cache/tiles/
+work_dirs/facts/**
+work_dirs/vis/**
+work_dirs/reports/**
+work_dirs/ingest/**
+work_dirs/review_queue/**
+!work_dirs/**/.gitkeep
+
+# HuggingFace / 本地工具缓存
+.cache/
+**/.cache/
+
 # 仅仓库根目录临时调试图（保留 data/、samples/、docs/ 中的图片）
 /*.png
 /*.jpg
