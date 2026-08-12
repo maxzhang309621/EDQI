@@ -12,7 +12,6 @@ perception_backend: qwen_vl
 perception:
   cache_enabled: true
   cache_dir: work_dirs/cache/perception
-  # true：与 main 一致，对 number_mark 等做分块定位（8B 全图属性召回更好）
   tile_enabled: true
   tile_size: 1280
   tile_overlap: 0.2
@@ -51,11 +50,11 @@ models:
     enable_thinking: false
     max_new_tokens: 2048
 
-  # 主路径 VLM：定位 + 字段解析（方案 A：8B 全图属性；显存紧可改回 4B）
+  # 主路径 VLM：定位 + 字段解析
   qwen3_vl:
     path: models/Qwen3-VL-8B-Instruct
     hf_id: Qwen/Qwen3-VL-8B-Instruct
-    # 更小: Qwen/Qwen3-VL-4B-Instruct / Qwen3-VL-2B-Instruct
+    # 更小: Qwen/Qwen3-VL-2B-Instruct
     device: auto
     dtype: auto
     max_new_tokens: 2048

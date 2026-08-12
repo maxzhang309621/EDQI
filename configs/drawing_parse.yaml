@@ -15,8 +15,7 @@ tables_only: false
 
 # ---------- 非表格：区域/对象 ----------
 # parse_kind=dimension_marks：尺寸标注属性（Ø/R/长度/° + 基本尺寸/公差）
-# backend=vlm（默认，与 main 一致）：走 Qwen-VL 全图/分块，与数字重叠 OCR 独立
-# backend=ocr / ocr_locate_vlm_filter：可回退 OCR 或 OCR+VLM 精筛
+# backend=vlm（默认）：走 Qwen-VL，与数字重叠 OCR 独立；backend=ocr 可回退旧路径
 objects:
   - enabled: true
     entity_id: number_mark
@@ -33,7 +32,7 @@ objects:
     ocr_angle_adapt_max_extra: 4
     ocr_deskew_reread: true
     ocr_deskew_min_angle: 8
-    # backend=ocr 时用 tables 定位框剔除；vlm 路径由提示词排除表格区
+    # backend=ocr 时：用 tables 定位框剔除框内数字；vlm 路径由提示词排除表格区
     exclude_table_regions: true
     exclude_table_pad: 2
     exclude_table_expand_up: 0.12
