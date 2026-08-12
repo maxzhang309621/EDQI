@@ -19,6 +19,7 @@ from pipeline.dimension_parse import (
     clip_fields_to_schema,
     enrich_dimension_fields_from_text,
     is_valid_dimension_mark,
+    text_has_diameter_or_angle_symbol,
 )
 from pipeline.perceive_common import (
     expand_bbox,
@@ -305,6 +306,7 @@ def filter_ocr_dimension_candidates_with_vlm(
 
     kept: list[dict[str, Any]] = []
     rejected = 0
+    ocr_symbol_fallback = 0
     for inst in candidates:
         bbox = inst.get("bbox")
         if not bbox or len(bbox) != 4:
@@ -320,7 +322,7 @@ def filter_ocr_dimension_candidates_with_vlm(
             or re.fullmatch(r"[Rr]\s*\d+(?:[.,]\d+)?(?:\s*[±+\-].*)?", ocr_text.strip())
         )
         if role == "vlm_symbol" or (bare_num and not re.search(r"[Ø⌀Φφø°º]", ocr_text)):
-            local_expand = min(0.45, max(expand * 2.4, expand + 0.18))
+            local_expand = min(0.55, max(expand * 2.8, expand + 0.22))
         crop_box = expand_bbox(list(bbox), width, height, local_expand)
         crop = image.crop(tuple(crop_box))
         try:
@@ -349,14 +351,27 @@ def filter_ocr_dimension_candidates_with_vlm(
             if not isinstance(fields, dict):
                 fields = {}
             raw_text = str(parsed.get("raw_text") or "") if isinstance(parsed, dict) else ""
-            # 严格：以 VLM 判定为准；VLM 判空则拒绝，不再用 OCR 文本回填“救活”
+            # 以 VLM 为准；若 OCR 已有 Ø/° 证据而 VLM 判空，允许规则回填，避免误杀直径/角度
             vlm_text = str(fields.get("text") or raw_text or "").strip()
             vlm_kind = str(fields.get("dim_kind") or "").strip().lower()
             if vlm_kind in {"", "null", "none"}:
                 vlm_kind = ""
+            ocr_symbol = text_has_diameter_or_angle_symbol(ocr_text) or str(
+                ocr_fields.get("dim_kind") or ""
+            ).lower() in {"diameter", "angle"}
             if not vlm_text and not vlm_kind:
-                rejected += 1
-                continue
+                if ocr_symbol and is_valid_dimension_mark(
+                    ocr_fields,
+                    text=ocr_text,
+                    require_dim_kind=flags["require_dim_kind"],
+                    require_basic_size=flags["require_basic_size"],
+                ):
+                    fields = dict(ocr_fields)
+                    vlm_text = ocr_text
+                    ocr_symbol_fallback += 1
+                else:
+                    rejected += 1
+                    continue
             text_v = vlm_text or ocr_text
             fields = enrich_dimension_fields_from_text(fields, text_v, bbox=bbox)
             if flags["strict"]:
@@ -368,8 +383,21 @@ def filter_ocr_dimension_candidates_with_vlm(
                 require_dim_kind=flags["require_dim_kind"],
                 require_basic_size=flags["require_basic_size"],
             ):
-                rejected += 1
-                continue
+                # OCR 已有直径/角度符号时再兜一次
+                if ocr_symbol and is_valid_dimension_mark(
+                    ocr_fields,
+                    text=ocr_text,
+                    require_dim_kind=flags["require_dim_kind"],
+                    require_basic_size=flags["require_basic_size"],
+                ):
+                    fields = enrich_dimension_fields_from_text(dict(ocr_fields), ocr_text, bbox=bbox)
+                    if flags["strict"]:
+                        fields = clip_fields_to_schema(fields, allowed)
+                    text_v = ocr_text
+                    ocr_symbol_fallback += 1
+                else:
+                    rejected += 1
+                    continue
             if not bbox_geometry_ok(
                 bbox,
                 page_w=width,
@@ -383,6 +411,8 @@ def filter_ocr_dimension_candidates_with_vlm(
                 continue
             fields["ocr_prescreen"] = True
             fields["vlm_filtered"] = True
+            if role:
+                fields["ocr_role"] = role
             out = dict(inst)
             out["fields"] = fields
             out["raw_text"] = text_v or out.get("raw_text") or ""
@@ -397,6 +427,8 @@ def filter_ocr_dimension_candidates_with_vlm(
     if notes is not None:
         notes.append(f"vlm_dim_filter={len(kept)}/{len(candidates)}")
         notes.append(f"vlm_dim_rejected={rejected}")
+        if ocr_symbol_fallback:
+            notes.append(f"vlm_dim_ocr_symbol_fallback={ocr_symbol_fallback}")
     return kept
 
 

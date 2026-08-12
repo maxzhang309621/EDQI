@@ -93,7 +93,7 @@ def _looks_like_number_mark(text: str) -> bool:
 def _merge_symbol_number_boxes(
     instances: list[dict[str, Any]],
     *,
-    gap_ratio: float = 2.8,
+    gap_ratio: float = 4.0,
 ) -> list[dict[str, Any]]:
     """把单独符号框（Ø/°）与邻近数字框合并，避免直径/角度因符号漏检被拆丢。"""
     from pipeline.dimension_parse import is_dim_symbol_only, normalize_ocr_dimension_text
@@ -143,17 +143,26 @@ def _merge_symbol_number_boxes(
                 continue
             ox, oy = _center(ob)
             dist = ((sx - ox) ** 2 + (sy - oy) ** 2) ** 0.5
-            gap = gap_ratio * max(_side(sb), _side(ob))
-            # 也允许轴对齐邻近（符号贴在数字左侧/右侧/上下）
+            ref = max(_side(sb), _side(ob))
+            gap = gap_ratio * ref
+            # 轴对齐邻近（含竖排：符号在数字上/下）
             axis_near = (
                 abs(sx - ox) <= gap and abs(sy - oy) <= gap
             ) or (
-                abs(sy - oy) <= 0.85 * max(_side(sb), _side(ob))
+                abs(sy - oy) <= 1.15 * ref
                 and (
                     abs(sb[2] - ob[0]) <= gap
                     or abs(ob[2] - sb[0]) <= gap
                     or abs(sb[3] - ob[1]) <= gap
                     or abs(ob[3] - sb[1]) <= gap
+                )
+            ) or (
+                abs(sx - ox) <= 1.15 * ref
+                and (
+                    abs(sb[3] - ob[1]) <= gap
+                    or abs(ob[3] - sb[1]) <= gap
+                    or abs(sb[2] - ob[0]) <= gap
+                    or abs(ob[2] - sb[0]) <= gap
                 )
             )
             if dist > gap and not axis_near:
@@ -1002,15 +1011,11 @@ def perceive_number_overlap(
     min_ink_ratio = float(overlap_cfg.get("min_ink_ratio", 0.06))
     # 重叠检测 OCR：仅用 perception.number_overlap（ocr_angles 等），不改其行为
     angles = [float(a) for a in overlap_cfg.get("ocr_angles", [0, 90, -90])]
-    # 尺寸属性专用：自适应角 / deskew；一旦走重叠检测则强制关闭，避免干扰
-    if detect_overlap:
-        angle_adapt = False
-        deskew_reread = False
-        deskew_min_angle = 8.0
-    else:
-        angle_adapt = bool(dim_cfg.get("ocr_angle_adapt", False))
-        deskew_reread = bool(dim_cfg.get("ocr_deskew_reread", False))
-        deskew_min_angle = float(dim_cfg.get("ocr_deskew_min_angle", 8.0))
+    # 尺寸属性专用增强与重叠检测解耦：即使 detect_overlap=True 也允许属性路 adapt/deskew
+    attr_angle_adapt = bool(parse_dims and dim_cfg.get("ocr_angle_adapt", False))
+    attr_deskew_reread = bool(parse_dims and dim_cfg.get("ocr_deskew_reread", False))
+    attr_deskew_min_angle = float(dim_cfg.get("ocr_deskew_min_angle", 8.0))
+    attr_extra_angles = [float(a) for a in (dim_cfg.get("ocr_angles") or [])] if parse_dims else []
     fused_enabled = bool(overlap_cfg.get("fused_enabled", True)) and detect_overlap
     junc_thr = float(overlap_cfg.get("fused_junc_per_skel", 0.68))
     edge_thr = float(overlap_cfg.get("fused_edge_density", 0.26))
@@ -1132,17 +1137,20 @@ def perceive_number_overlap(
             e["bbox"] = [int(x1 * inv), int(y1 * inv), int(x2 * inv), int(y2 * inv)]
         ocr_insts.extend(extra)
 
-    # 2b) 按已检出文本角自适应补旋转 OCR（倾斜尺寸）
+    # 基础 OCR（重叠角度）去重 → 重叠检测快照；属性增强在副本上进行，不改重叠参数
+    ocr_insts = _dedupe_boxes(ocr_insts, iou_thr=0.75)
+    ocr_insts = _cluster_near_duplicates(ocr_insts, iou_thr=0.28)
+    ocr_overlap = [_normalize_ocr_instance_text(dict(i)) for i in ocr_insts]
+    ocr_overlap = [_ensure_angle_fields(i) for i in ocr_overlap]
+
     adapt_extra = 0
-    if angle_adapt:
-        extra_angs = suggest_extra_page_angles(
-            (get_instance_angle(i) for i in ocr_insts),
-            existing=angles,
-            step=float(dim_cfg.get("ocr_angle_adapt_step", 15)),
-            min_count=int(dim_cfg.get("ocr_angle_adapt_min_count", 2)),
-            max_extra=int(dim_cfg.get("ocr_angle_adapt_max_extra", 4)),
-        )
-        for ang in extra_angs:
+    deskew_hits = 0
+    ocr_attr = [dict(i) for i in ocr_insts]
+    if parse_dims:
+        known_angs = {float(a) for a in angles}
+        for ang in attr_extra_angles:
+            if float(ang) in known_angs:
+                continue
             more = _ocr_once(
                 engine,
                 image_orig,
@@ -1151,60 +1159,92 @@ def perceive_number_overlap(
                 min_side=min_side,
                 img_min_side=float(min(ow0, oh0)),
                 entity_id=entity_id,
-                angle=ang,
+                angle=float(ang),
                 orig_size=(ow0, oh0),
             )
-            ocr_insts.extend(more)
+            ocr_attr.extend(more)
+            known_angs.add(float(ang))
             adapt_extra += len(more)
-        if extra_angs:
-            angles = list(angles) + list(extra_angs)
-
-    ocr_insts = _dedupe_boxes(ocr_insts, iou_thr=0.75)
-    ocr_insts = _cluster_near_duplicates(ocr_insts, iou_thr=0.28)
-    # 符号与数字拆框合并 + OCR 符号变体归一（Ø/°）
-    ocr_insts = _merge_symbol_number_boxes(ocr_insts)
-    ocr_insts = [_normalize_ocr_instance_text(i) for i in ocr_insts]
-    sym_merged = sum(
-        1 for i in ocr_insts if (i.get("fields") or {}).get("symbol_merged")
-    )
-
-    # 2c) 按文本角 deskew 裁剪重读，提高倾斜/竖排解析准确率
-    deskew_hits = 0
-    if deskew_reread and ocr_insts:
-        refined: list[dict[str, Any]] = []
-        for inst in ocr_insts:
-            new_inst = _deskew_reread_instance(
-                engine,
-                image_orig,
-                inst,
-                conf_th=max(0.28, conf_th - 0.05),
-                min_abs_angle=deskew_min_angle,
+        if attr_angle_adapt:
+            extra_angs = suggest_extra_page_angles(
+                (get_instance_angle(i) for i in ocr_attr),
+                existing=list(known_angs),
+                step=float(dim_cfg.get("ocr_angle_adapt_step", 15)),
+                min_count=int(dim_cfg.get("ocr_angle_adapt_min_count", 2)),
+                max_extra=int(dim_cfg.get("ocr_angle_adapt_max_extra", 4)),
             )
-            if new_inst.get("fields", {}).get("ocr_deskew"):
-                deskew_hits += 1
-            refined.append(_ensure_angle_fields(new_inst))
-        ocr_insts = refined
+            for ang in extra_angs:
+                more = _ocr_once(
+                    engine,
+                    image_orig,
+                    ink_orig,
+                    conf_th=conf_th,
+                    min_side=min_side,
+                    img_min_side=float(min(ow0, oh0)),
+                    entity_id=entity_id,
+                    angle=ang,
+                    orig_size=(ow0, oh0),
+                )
+                ocr_attr.extend(more)
+                adapt_extra += len(more)
+        ocr_attr = _dedupe_boxes(ocr_attr, iou_thr=0.75)
+        ocr_attr = _cluster_near_duplicates(ocr_attr, iou_thr=0.28)
+        # 属性路加强符号合并（不影响重叠快照）
+        ocr_attr = _merge_symbol_number_boxes(ocr_attr, gap_ratio=4.0)
+        ocr_attr = [_normalize_ocr_instance_text(i) for i in ocr_attr]
+        if attr_deskew_reread and ocr_attr:
+            refined: list[dict[str, Any]] = []
+            for inst in ocr_attr:
+                new_inst = _deskew_reread_instance(
+                    engine,
+                    image_orig,
+                    inst,
+                    conf_th=max(0.28, conf_th - 0.05),
+                    min_abs_angle=attr_deskew_min_angle,
+                )
+                if new_inst.get("fields", {}).get("ocr_deskew"):
+                    deskew_hits += 1
+                refined.append(_ensure_angle_fields(new_inst))
+            ocr_attr = refined
+        else:
+            ocr_attr = [_ensure_angle_fields(i) for i in ocr_attr]
     else:
-        ocr_insts = [_ensure_angle_fields(i) for i in ocr_insts]
+        ocr_attr = [_ensure_angle_fields(_normalize_ocr_instance_text(i)) for i in ocr_attr]
+
+    sym_merged = sum(1 for i in ocr_attr if (i.get("fields") or {}).get("symbol_merged"))
 
     # 非表格尺寸：剔除落在表格定位框内的 OCR 数字
     excluded_table = 0
     if exclude_bboxes:
-        ocr_insts, excluded_table = filter_instances_outside_bboxes(
-            ocr_insts,
+        ocr_overlap, n1 = filter_instances_outside_bboxes(
+            ocr_overlap,
             exclude_bboxes,
             pad=float(exclude_pad),
-            entity_ids=None,  # 本路全是数字标注
+            entity_ids=None,
         )
+        ocr_attr, n2 = filter_instances_outside_bboxes(
+            ocr_attr,
+            exclude_bboxes,
+            pad=float(exclude_pad),
+            entity_ids=None,
+        )
+        excluded_table = n1 + n2
     excluded_table_text = 0
     if exclude_table_texts:
-        ocr_insts, excluded_table_text = filter_instances_matching_table_values(
-            ocr_insts,
+        ocr_overlap, n1 = filter_instances_matching_table_values(
+            ocr_overlap,
             exclude_table_texts,
             entity_ids=None,
         )
+        ocr_attr, n2 = filter_instances_matching_table_values(
+            ocr_attr,
+            exclude_table_texts,
+            entity_ids=None,
+        )
+        excluded_table_text = n1 + n2
     notes = [
-        f"ocr={len(ocr_insts)}",
+        f"ocr={len(ocr_attr)}",
+        f"ocr_overlap_base={len(ocr_overlap)}",
         f"tile_ocr={notes_tile}",
         f"local_ocr={notes_local}",
         f"angle_adapt_extra={adapt_extra}",
@@ -1212,6 +1252,7 @@ def perceive_number_overlap(
         f"symbol_merged={sym_merged}",
         f"detect_overlap={detect_overlap}",
         f"dimension_marks={parse_dims}",
+        f"attr_ocr_enhance={bool(parse_dims and (attr_angle_adapt or attr_deskew_reread or attr_extra_angles))}",
         f"excluded_table_region={excluded_table}",
         f"excluded_table_value={excluded_table_text}",
     ]
@@ -1222,9 +1263,12 @@ def perceive_number_overlap(
     used: set[int] = set()
     collected: list[dict[str, Any]] = []
 
+    # 重叠检测只用基础快照 ocr_overlap；属性实例来自增强后的 ocr_attr
+    ocr_insts = ocr_overlap
+
     if not detect_overlap:
         notes.append("overlap_skipped=dimension_marks_parse_only")
-        for idx, inst in enumerate(ocr_insts):
+        for idx, inst in enumerate(ocr_attr):
             item = dict(inst)
             item["parent_id"] = f"ocr{idx}"
             ink_px = float(_ink_in_bbox(ink_orig, inst["bbox"]).sum())
@@ -1437,12 +1481,20 @@ def perceive_number_overlap(
             else:
                 notes.append("fused_blobs=0")
     if detect_overlap:
-        for idx, inst in enumerate(ocr_insts):
-            if idx in used:
+        # 属性实例来自增强 OCR；与 keep_pair 高 IoU 的丢掉，避免重复
+        pairs_so_far = [c for c in collected if c.get("keep_pair")]
+        for idx, inst in enumerate(ocr_attr):
+            bb = inst.get("bbox")
+            if not bb:
+                continue
+            if any(iou_xyxy(bb, p["bbox"]) > 0.55 for p in pairs_so_far if p.get("bbox")):
                 continue
             item = dict(inst)
             item["parent_id"] = f"ocr{idx}"
-            item["fields"] = {**(item.get("fields") or {}), "ink_pixels": float(masks[idx].sum())}
+            item["fields"] = {
+                **(item.get("fields") or {}),
+                "ink_pixels": float(_ink_in_bbox(ink_orig, bb).sum()),
+            }
             collected.append(item)
 
     notes.append(f"ink_pairs={pair_hits}")

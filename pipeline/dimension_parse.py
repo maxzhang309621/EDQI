@@ -231,6 +231,16 @@ def is_vlm_owned_dim_kind(kind: str | None) -> bool:
     return str(kind or "").strip().lower() in _VLM_OWNED_DIM_KINDS
 
 
+def text_has_diameter_or_angle_symbol(text: str) -> bool:
+    """OCR/归一化文本是否已含直径或角度符号证据。"""
+    t = _normalize_text(text or "")
+    if re.search(r"[Ø⌀Φφø∅°º]", t):
+        return True
+    if _DIAM_PREFIX.match(t) or _ANGLE_SUFFIX.search(t) or _ANGLE_INLINE.search(t):
+        return True
+    return False
+
+
 def is_bare_numeric_dimension_candidate(text: str) -> bool:
     """无 Ø/R/° 的纯数值（含 ±），可送 VLM 看是否为直径/角度。"""
     raw = (text or "").strip()
@@ -460,11 +470,11 @@ def prescreen_ocr_dimension_candidates(
             continue
 
         kind = str(fields.get("dim_kind") or "").strip().lower()
-        # OCR 直接采信 radius/length；直径/角度或裸数字 → 送 VLM 认 Ø/°
-        if kind in accept:
-            role = "ocr_owned"
-        elif kind in _VLM_OWNED_DIM_KINDS or is_bare_numeric_dimension_candidate(text_v):
+        # OCR 采信带符号的 radius；直径/角度/裸数字 → VLM 认 Ø/°
+        if kind in _VLM_OWNED_DIM_KINDS or is_bare_numeric_dimension_candidate(text_v):
             role = "vlm_symbol"
+        elif kind in accept:
+            role = "ocr_owned"
         else:
             dropped += 1
             continue

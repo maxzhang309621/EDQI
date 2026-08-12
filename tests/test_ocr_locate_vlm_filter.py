@@ -131,7 +131,7 @@ def test_ocr_owned_vs_vlm_symbol_roles():
     cands, _, _ = prescreen_ocr_dimension_candidates(instances, page_w=2048, page_h=1448)
     roles = {c["raw_text"]: (c["fields"].get("ocr_role"), c["fields"].get("dim_kind")) for c in cands}
     assert roles["R5"][0] == "ocr_owned"
-    assert roles["12.5"][0] == "ocr_owned"  # 长度归 OCR
+    assert roles["12.5"][0] == "vlm_symbol"  # 裸数字交 VLM 认 Ø/°
     assert roles["Ø10"][0] == "vlm_symbol"  # 直径必须 VLM 确认
 
     # 直径未经 VLM 确认 → sanitize 丢弃
@@ -161,6 +161,80 @@ def test_vertical_bbox_geometry_relaxed():
 
     # 竖排窄高框应通过
     assert bbox_geometry_ok([100, 100, 130, 220], page_w=2048, page_h=1448)
+
+
+def test_merge_symbol_farther_boxes():
+    from pipeline.dimension_parse import parse_dimension_text
+    from pipeline.perceive_number_overlap import _merge_symbol_number_boxes
+
+    # 符号与数字距离更大时仍应合并（gap_ratio=4）
+    insts = [
+        {
+            "entity_id": "number_mark",
+            "bbox": [10, 10, 26, 28],
+            "raw_text": "Ø",
+            "fields": {"text": "Ø"},
+            "confidence": 0.7,
+        },
+        {
+            "entity_id": "number_mark",
+            "bbox": [55, 10, 95, 28],
+            "raw_text": "10",
+            "fields": {"text": "10"},
+            "confidence": 0.9,
+        },
+    ]
+    out = _merge_symbol_number_boxes(insts)
+    assert len(out) == 1
+    assert parse_dimension_text(str(out[0].get("raw_text")))["dim_kind"] == "diameter"
+
+
+def test_vlm_filter_ocr_symbol_fallback(tmp_path: Path):
+    img = Image.new("RGB", (800, 600), (255, 255, 255))
+    path = tmp_path / "sym.png"
+    img.save(path)
+    candidates = [
+        {
+            "entity_id": "number_mark",
+            "bbox": [10, 10, 50, 30],
+            "raw_text": "Ø10",
+            "fields": {
+                "text": "Ø10",
+                "dim_kind": "diameter",
+                "basic_size": "10",
+                "ocr_role": "vlm_symbol",
+            },
+            "confidence": 0.9,
+        }
+    ]
+    ent = {
+        "parse_kind": "dimension_marks",
+        "strict_fields_only": True,
+        "require_dim_kind": True,
+        "require_basic_size": True,
+        "fields": [{"name": "text"}, {"name": "dim_kind"}, {"name": "basic_size"}],
+    }
+
+    def gen_null(crop, prompt, max_tokens):
+        return json.dumps(
+            {
+                "fields": {
+                    "text": None,
+                    "dim_kind": None,
+                    "basic_size": None,
+                },
+                "raw_text": "",
+            }
+        )
+
+    notes: list[str] = []
+    kept = filter_ocr_dimension_candidates_with_vlm(
+        path, candidates, ent, {"width": 800, "height": 600}, notes=notes, generate_fn=gen_null
+    )
+    assert len(kept) == 1
+    assert kept[0]["fields"].get("dim_kind") == "diameter"
+    assert kept[0]["fields"].get("vlm_filtered") is True
+    assert any("ocr_symbol_fallback" in n for n in notes)
 
 
 def test_prescreen_keeps_pairs_and_valid_dims():

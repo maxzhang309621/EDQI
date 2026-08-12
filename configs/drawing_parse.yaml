@@ -34,6 +34,8 @@ objects:
     ocr_angle_adapt_max_extra: 4
     ocr_deskew_reread: true
     ocr_deskew_min_angle: 8
+    # 属性 OCR 专用扫描角（仅尺寸属性路；不改 perception.number_overlap.ocr_angles）
+    ocr_angles: [0, 30, 45, 60, 90, -30, -45, -60, -90]
     # OCR 采信 radius/length；diameter/angle 必须 VLM 认符号后确认
     ocr_accept_kinds: [radius, length]
     vlm_require_kinds: [diameter, angle]

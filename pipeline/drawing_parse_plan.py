@@ -183,6 +183,7 @@ def _normalize_dimension_marks_block(block: dict[str, Any]) -> dict[str, Any] | 
         "ocr_angle_adapt_max_extra": int(block.get("ocr_angle_adapt_max_extra", 4)),
         "ocr_deskew_reread": bool(block.get("ocr_deskew_reread", False)),
         "ocr_deskew_min_angle": float(block.get("ocr_deskew_min_angle", 8.0)),
+        "ocr_angles": [float(a) for a in (block.get("ocr_angles") or [])],
         "ocr_accept_kinds": [
             str(k).strip().lower()
             for k in (block.get("ocr_accept_kinds") or ["radius", "length"])
