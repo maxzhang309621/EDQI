@@ -155,6 +155,11 @@ def _normalize_dimension_marks_block(block: dict[str, Any]) -> dict[str, Any] | 
         "ocr_angle_adapt_max_extra": int(block.get("ocr_angle_adapt_max_extra", 4)),
         "ocr_deskew_reread": bool(block.get("ocr_deskew_reread", False)),
         "ocr_deskew_min_angle": float(block.get("ocr_deskew_min_angle", 8.0)),
+        # VLM 路径：裁剪 deskew + 弱结果时有限角度重试（倾斜/竖排）
+        "vlm_deskew_reread": bool(block.get("vlm_deskew_reread", True)),
+        "vlm_deskew_min_angle": float(block.get("vlm_deskew_min_angle", 8.0)),
+        "vlm_orientation_retry": bool(block.get("vlm_orientation_retry", True)),
+        "vlm_orientation_retry_max": int(block.get("vlm_orientation_retry_max", 2)),
         # 默认排除表格框内 OCR 数字（尺寸属性仅表格外；主要用于 backend=ocr）
         "exclude_table_regions": bool(block.get("exclude_table_regions", True)),
         "exclude_table_pad": float(block.get("exclude_table_pad", 2.0)),
