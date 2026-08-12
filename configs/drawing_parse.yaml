@@ -23,7 +23,8 @@ objects:
     backend: vlm
     locate_query: >-
       图中尺寸数字或数值标注（Ø直径 / R半径 / 长度 / °角度），
-      含水平、竖排、大角度倾斜文本；排除标题栏/图号/材料牌号
+      含水平、竖排及 30/60/120/150/210/240/300/330° 斜向文本；
+      排除标题栏/图号/材料牌号
     cardinality: many
     # false=属性路径不做墨迹重叠配对；规则启用 NUM_TEXT_NO_OVERLAP 时重叠仍走独立 OCR
     detect_overlap: false
@@ -34,11 +35,13 @@ objects:
     ocr_angle_adapt_max_extra: 4
     ocr_deskew_reread: true
     ocr_deskew_min_angle: 8
-    # backend=vlm：Pass2 按框几何 deskew；弱结果再试有限朝向
+    # backend=vlm：Pass2 按框几何 deskew；弱结果再试斜向朝向
     vlm_deskew_reread: true
     vlm_deskew_min_angle: 8
     vlm_orientation_retry: true
-    vlm_orientation_retry_max: 2
+    # 覆盖全部配置斜向角（首读成功则不会跑满）
+    vlm_orientation_retry_max: 8
+    vlm_oblique_angles: [30, 60, 120, 150, 210, 240, 300, 330]
     # backend=ocr 时：用 tables 定位框剔除框内数字；vlm 路径由提示词排除表格区
     exclude_table_regions: true
     exclude_table_pad: 2
@@ -48,7 +51,7 @@ objects:
         parse_hint: 尺寸标注可见原文（按正向阅读顺序写出，勿因倾斜颠倒数字）
         required: false
       - name: angle
-        parse_hint: 文本相对水平线的朝向角（度，水平≈0，竖排≈±90，倾斜约±30~±60）
+        parse_hint: 文本相对水平线朝向角（度；水平≈0，竖排≈±90，斜向 30/60/120/150/210/240/300/330）
         required: false
       - name: dim_kind
         parse_hint: diameter|radius|length|angle

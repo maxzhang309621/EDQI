@@ -87,7 +87,17 @@ def test_vlm_deskew_config_defaults():
     dim = next(e for e in plan if e.get("parse_kind") == "dimension_marks")
     assert dim.get("vlm_deskew_reread") is True
     assert dim.get("vlm_orientation_retry") is True
-    assert int(dim.get("vlm_orientation_retry_max", 0)) >= 1
+    assert int(dim.get("vlm_orientation_retry_max", 0)) >= 8
+    assert [float(a) for a in dim.get("vlm_oblique_angles") or []] == [
+        30.0,
+        60.0,
+        120.0,
+        150.0,
+        210.0,
+        240.0,
+        300.0,
+        330.0,
+    ]
 
 
 def test_dimension_pass2_angles_vertical_and_square():
@@ -95,14 +105,30 @@ def test_dimension_pass2_angles_vertical_and_square():
         "vlm_deskew_reread": True,
         "vlm_deskew_min_angle": 8,
         "vlm_orientation_retry": True,
-        "vlm_orientation_retry_max": 2,
+        "vlm_orientation_retry_max": 8,
+        "vlm_oblique_angles": [30, 60, 120, 150, 210, 240, 300, 330],
     }
     vert = _dimension_pass2_angles([10, 10, 20, 80], ent)
     assert vert[0] == 90.0
     assert -90.0 in vert
     square = _dimension_pass2_angles([10, 10, 40, 40], ent)
     assert square[0] == 0.0
-    assert 90.0 in square
+    # 近水平框：配置的 8 个斜向角都应进入重试序列
+    for a in (30.0, 60.0, 120.0, 150.0, 210.0, 240.0, 300.0, 330.0):
+        assert a in square
+    assert len(square) == 9  # 0 + 8 oblique
+
+
+def test_dimension_pass2_angles_oblique_order_for_square():
+    ent = {
+        "vlm_deskew_reread": True,
+        "vlm_deskew_min_angle": 8,
+        "vlm_orientation_retry": True,
+        "vlm_orientation_retry_max": 8,
+        "vlm_oblique_angles": [30, 60, 120, 150, 210, 240, 300, 330],
+    }
+    square = _dimension_pass2_angles([10, 10, 40, 40], ent)
+    assert square[1:9] == [30.0, 60.0, 120.0, 150.0, 210.0, 240.0, 300.0, 330.0]
 
 
 def test_deskew_crop_rotates_and_upsizes():

@@ -217,7 +217,7 @@ def _dimension_marks_locate_rules() -> list[str]:
     return [
         "对于尺寸标注（parse_kind=dimension_marks / number_mark）：",
         "只定位视图中的尺寸数字与公差标注（含 Ø/⌀/Φ 直径、R 半径、长度、角度°、±公差）。",
-        "必须同时检出水平、竖排（沿尺寸线垂直书写）以及大角度倾斜的尺寸文字；"
+        "必须同时检出水平、竖排，以及约 30°/60°/120°/150°/210°/240°/300°/330° 等斜向尺寸文字；"
         "竖排/倾斜的数字也要各自给出 bbox，勿因朝向漏检。",
         "禁止定位：标题栏/图框表格文字、图号、材料牌号、BOM、Siemens/版权、比例、页码、"
         "零件名、表面粗糙度符号旁的非尺寸长串、坐标轴刻度。",
@@ -238,8 +238,8 @@ def _dimension_marks_pass2_prompt(ent: dict[str, Any]) -> str:
         "- dim_kind=diameter|radius|length|angle|null；\n"
         "- basic_size=基本尺寸（±前）；tolerance=公差（±后，无则 null）；\n"
         "- has_tolerance=是否标明公差（布尔）；\n"
-        "- angle=原图中文本相对水平线朝向角（度：水平≈0，竖排≈90 或 -90，"
-        "倾斜约 ±30~±60；与局部图是否已旋转无关，填原图朝向）。\n"
+        "- angle=原图中文本相对水平线朝向角（度：水平≈0，竖排≈90/-90，"
+        "斜向常见 30/60/120/150/210/240/300/330；与局部图是否已旋转无关，填原图朝向）。\n"
         "禁止编造。格式: {\"fields\":{...},\"raw_text\":\"...\"}"
     )
 
@@ -280,11 +280,52 @@ def _dimension_read_looks_weak(fields: dict[str, Any] | None) -> bool:
     return False
 
 
+_DEFAULT_VLM_OBLIQUE_ANGLES: list[float] = [
+    30.0,
+    60.0,
+    120.0,
+    150.0,
+    210.0,
+    240.0,
+    300.0,
+    330.0,
+]
+
+
+def _orient_angle_near(a: float, b: float, *, tol: float = 5.0) -> bool:
+    """朝向角是否接近（按 360° 圆环最短弧）。"""
+    d = abs(float(a) - float(b)) % 360.0
+    if d > 180.0:
+        d = 360.0 - d
+    return d < tol
+
+
+def _parse_vlm_oblique_angles(ent: dict[str, Any]) -> list[float]:
+    raw = ent.get("vlm_oblique_angles")
+    if raw is None:
+        return list(_DEFAULT_VLM_OBLIQUE_ANGLES)
+    out: list[float] = []
+    if not isinstance(raw, (list, tuple)):
+        return list(_DEFAULT_VLM_OBLIQUE_ANGLES)
+    for item in raw:
+        try:
+            a = float(item) % 360.0
+        except (TypeError, ValueError):
+            continue
+        if any(_orient_angle_near(a, x) for x in out):
+            continue
+        out.append(a)
+    return out or list(_DEFAULT_VLM_OBLIQUE_ANGLES)
+
+
 def _dimension_pass2_angles(
     bbox: list[Any] | None,
     ent: dict[str, Any],
 ) -> list[float]:
-    """首次 deskew 角 + 可选重试朝向（供 crop.rotate(-ang)；±90 需区分旋向）。"""
+    """首次 deskew 角 + 斜向/对面朝向重试（供 crop.rotate(-ang)）。
+
+    水平/竖排由 bbox 粗估；斜向默认覆盖 30/60/120/150/210/240/300/330。
+    """
     geom = text_angle_from_bbox(bbox)
     deskew_on = bool(ent.get("vlm_deskew_reread", True))
     min_ang = float(ent.get("vlm_deskew_min_angle", 8.0))
@@ -299,18 +340,24 @@ def _dimension_pass2_angles(
     if not bool(ent.get("vlm_orientation_retry", True)):
         return angles
 
+    candidates: list[float] = []
     if abs(primary) >= 60.0:
-        # 对面竖排旋向 + 不旋转
-        candidates = [-primary if abs(primary) > 1e-6 else -90.0, 0.0]
-    elif abs(primary) < 1e-6:
-        candidates = [90.0, -90.0, 45.0, -45.0]
+        # 对面竖排旋向 + 不旋转，再补斜向
+        candidates.append(-primary if abs(primary) > 1e-6 else -90.0)
+        candidates.append(0.0)
     else:
-        candidates = [0.0, 90.0, -90.0, -primary]
+        # 近水平框：先试配置斜向（用户指定 30/60/...），再补竖排
+        candidates.extend(_parse_vlm_oblique_angles(ent))
+        candidates.extend([90.0, -90.0])
 
-    max_extra = max(0, int(ent.get("vlm_orientation_retry_max", 2)))
+    # 竖排主读后再挂斜向，覆盖“高框但实际是斜字”的情况
+    if abs(primary) >= 60.0:
+        candidates.extend(_parse_vlm_oblique_angles(ent))
+
+    max_extra = max(0, int(ent.get("vlm_orientation_retry_max", 8)))
     for cand in candidates:
         c = float(cand)
-        if any(abs(c - a) < 5.0 for a in angles):
+        if any(_orient_angle_near(c, a) for a in angles):
             continue
         angles.append(c)
         if len(angles) - 1 >= max_extra:

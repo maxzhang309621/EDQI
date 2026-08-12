@@ -159,7 +159,15 @@ def _normalize_dimension_marks_block(block: dict[str, Any]) -> dict[str, Any] | 
         "vlm_deskew_reread": bool(block.get("vlm_deskew_reread", True)),
         "vlm_deskew_min_angle": float(block.get("vlm_deskew_min_angle", 8.0)),
         "vlm_orientation_retry": bool(block.get("vlm_orientation_retry", True)),
-        "vlm_orientation_retry_max": int(block.get("vlm_orientation_retry_max", 2)),
+        "vlm_orientation_retry_max": int(block.get("vlm_orientation_retry_max", 8)),
+        "vlm_oblique_angles": [
+            float(a)
+            for a in (
+                block.get("vlm_oblique_angles")
+                if isinstance(block.get("vlm_oblique_angles"), (list, tuple))
+                else [30, 60, 120, 150, 210, 240, 300, 330]
+            )
+        ],
         # 默认排除表格框内 OCR 数字（尺寸属性仅表格外；主要用于 backend=ocr）
         "exclude_table_regions": bool(block.get("exclude_table_regions", True)),
         "exclude_table_pad": float(block.get("exclude_table_pad", 2.0)),
