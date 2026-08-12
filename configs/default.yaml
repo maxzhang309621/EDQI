@@ -12,7 +12,8 @@ perception_backend: qwen_vl
 perception:
   cache_enabled: true
   cache_dir: work_dirs/cache/perception
-  tile_enabled: true
+  # false：整图 VL 定位。true 时 number_mark 分块易出「右半幅细长条」假框（尤其 2B）
+  tile_enabled: false
   tile_size: 1280
   tile_overlap: 0.2
   tile_dir: work_dirs/cache/tiles
@@ -50,11 +51,11 @@ models:
     enable_thinking: false
     max_new_tokens: 2048
 
-  # 主路径 VLM：定位 + 字段解析（默认 4B；8GB 显存建议 float16，仍紧可改 2B 或量化）
+  # 主路径 VLM：定位 + 字段解析（方案 A：8B 全图属性；显存紧可改回 4B）
   qwen3_vl:
-    path: models/Qwen3-VL-4B-Instruct
-    hf_id: Qwen/Qwen3-VL-4B-Instruct
-    # 更小: Qwen/Qwen3-VL-2B-Instruct；更大: Qwen/Qwen3-VL-8B-Instruct
+    path: models/Qwen3-VL-8B-Instruct
+    hf_id: Qwen/Qwen3-VL-8B-Instruct
+    # 更小: Qwen/Qwen3-VL-4B-Instruct / Qwen3-VL-2B-Instruct
     device: auto
     dtype: auto
     max_new_tokens: 2048

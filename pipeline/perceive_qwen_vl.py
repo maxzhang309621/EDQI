@@ -6,6 +6,7 @@
 """
 from __future__ import annotations
 
+import re
 import time
 from pathlib import Path
 from typing import Any
@@ -13,10 +14,18 @@ from typing import Any
 from PIL import Image
 
 from pipeline import load_config, model_path_ready, resolve_model_source, resolve_path
-from pipeline.dimension_parse import enrich_dimension_fields_from_text
+from pipeline.dimension_parse import (
+    bbox_geometry_ok,
+    clip_fields_to_schema,
+    enrich_dimension_fields_from_text,
+    is_valid_dimension_mark,
+    text_has_diameter_or_angle_symbol,
+)
 from pipeline.perceive_common import (
     expand_bbox,
     extract_json_payload_safe,
+    filter_instances_outside_bboxes,
+    is_table_entity_id,
     mock_perceive,
     norm_bbox_to_pixels,
 )
@@ -214,27 +223,321 @@ def _coerce_instance_list(
 
 def _dimension_marks_locate_rules() -> list[str]:
     return [
-        "对于尺寸标注（parse_kind=dimension_marks / number_mark）：",
-        "只定位视图中的尺寸数字与公差标注（含 Ø/⌀/Φ 直径、R 半径、长度、角度°、±公差）。",
-        "禁止定位：标题栏/图框表格文字、图号、材料牌号、BOM、Siemens/版权、比例、页码、"
-        "零件名、表面粗糙度符号旁的非尺寸长串、坐标轴刻度。",
+        "对于尺寸标注（parse_kind=dimension_marks / number_mark）—严格模式：",
+        "只定位视图区中的尺寸数字与公差标注（含 Ø/⌀/Φ 直径、R 半径、长度数值、角度°、±公差）。",
+        "bbox 必须紧贴该尺寸文字，禁止拉成横贯半页/整页的细长条。",
+        "严禁定位表格框内任何文字：material_table、main_table、标题栏/参数表/BOM 单元格内的数字与代号一律不要输出为 number_mark。",
+        "禁止定位：标题栏/图框表格、图号、材料牌号、Siemens/版权、比例、页码、"
+        "零件名、粗糙度代号旁非尺寸串、坐标刻度、网格线、任何非尺寸文本。",
+        "拿不准是否为尺寸标注时宁可漏检，不要输出。",
         "每个独立尺寸标注各一个 bbox；重叠/压盖的尺寸也要分开框。",
     ]
 
 
 def _dimension_marks_pass2_prompt(ent: dict[str, Any]) -> str:
+    allowed = [str(f.get("name")) for f in (ent.get("fields") or []) if f.get("name")]
     field_desc = json_fields(ent)
+    allow_s = ", ".join(allowed) if allowed else "text, dim_kind, basic_size, tolerance, has_tolerance, angle"
     return (
-        "读取该局部图中的工程尺寸标注属性。只输出 JSON。\n"
-        "若裁剪区不是尺寸标注（图号/材料/标题栏等），fields 全部填 null。\n"
-        f"字段: {field_desc}\n"
+        "严格判定该局部图是否为工程视图中的尺寸标注。只输出 JSON。\n"
+        f"fields 只允许这些键（不得增删）: {allow_s}\n"
+        "若不是尺寸标注，全部字段填 null，raw_text=\"\"（宁缺毋滥）。\n"
+        f"字段说明: {field_desc}\n"
         "规则:\n"
-        "- text=可见原文；dim_kind=diameter|radius|length|angle|null；\n"
-        "- basic_size=基本尺寸（±前）；tolerance=公差（±后，无则 null）；\n"
-        "- has_tolerance=是否标明公差（布尔）；\n"
-        "- angle=文本相对水平线朝向角（度，水平≈0，竖排≈90 或 -90）。\n"
-        "禁止编造。格式: {\"fields\":{...},\"raw_text\":\"...\"}"
+        "- 优先检查数字旁是否有 Ø/⌀/Φ（直径）或 °（角度）；有则 dim_kind=diameter|angle，"
+        "并在 text 中写出符号（如 Ø10、45°）；\n"
+        "- R/r 后直接跟数字 → radius；普通长度数值/±公差 → length；\n"
+        "- 若裁剪内容明显是表格/标题栏单元格（标签旁的表值、图号、材料等），全部填 null；\n"
+        "- 一律拒绝：Max./MIN/TYP/REF、粗糙度(Rz/Ra)、视图字母、气泡号、图号、表值、残片；\n"
+        "- dim_kind 只能是 diameter|radius|length|angle，否则 null；\n"
+        "- basic_size=基本尺寸；tolerance=公差（无则 null）；has_tolerance 为布尔；\n"
+        "- angle=文本相对水平线朝向角（度，竖排≈±90）；\n"
+        "- 禁止输出未声明字段，禁止编造，禁止把非尺寸硬套成 length。\n"
+        "格式: {\"fields\":{...},\"raw_text\":\"...\"}"
     )
+
+
+def filter_ocr_dimension_candidates_with_vlm(
+    image_path: str | Path,
+    candidates: list[dict[str, Any]],
+    ent: dict[str, Any],
+    meta: dict[str, Any] | None = None,
+    config: dict[str, Any] | None = None,
+    *,
+    notes: list[str] | None = None,
+    allow_mock_fallback: bool = True,
+    generate_fn=None,
+) -> list[dict[str, Any]]:
+    """对 OCR 初筛后的尺寸候选做 VLM crop 精筛；保留 OCR bbox，只更新字段。"""
+    import json
+
+    if not candidates:
+        if notes is not None:
+            notes.append("vlm_dim_filter=0/0")
+        return []
+
+    cfg = config or load_config()
+    model_cfg = cfg.get("models", {}).get("qwen3_vl", {})
+    meta = meta or {}
+    image = Image.open(resolve_path(image_path)).convert("RGB")
+    width, height = image.size
+    meta.setdefault("width", width)
+    meta.setdefault("height", height)
+
+    flags = _dimension_ent_strict_flags(ent)
+    allowed = [str(f.get("name")) for f in (ent.get("fields") or []) if f.get("name")]
+    expand = float(ent.get("vlm_filter_crop_expand", model_cfg.get("crop_expand", 0.12)))
+    max_tokens = int(ent.get("max_new_tokens") or model_cfg.get("max_new_tokens", 512))
+    # 精筛只需短 JSON
+    max_tokens = min(max_tokens, 512)
+    field_prompt = _dimension_marks_pass2_prompt(ent)
+
+    use_mock = False
+    model = processor = None
+    if generate_fn is None:
+        if not model_path_ready(model_cfg):
+            if allow_mock_fallback:
+                use_mock = True
+                if notes is not None:
+                    notes.append("vlm_dim_filter_mock=true")
+            else:
+                raise FileNotFoundError(model_cfg.get("path"))
+        else:
+            model, processor = _load_vlm(model_cfg)
+
+    kept: list[dict[str, Any]] = []
+    rejected = 0
+    ocr_symbol_fallback = 0
+    for inst in candidates:
+        bbox = inst.get("bbox")
+        if not bbox or len(bbox) != 4:
+            rejected += 1
+            continue
+        ocr_fields = dict(inst.get("fields") or {})
+        ocr_text = str(inst.get("raw_text") or ocr_fields.get("text") or "")
+        # 纯数字 / OCR 标成待 VLM 认符号：加大裁剪以看见 Ø/°
+        local_expand = expand
+        role = str(ocr_fields.get("ocr_role") or "")
+        bare_num = bool(
+            re.fullmatch(r"[±+\-]?\d+(?:[.,]\d+)?", ocr_text.strip())
+            or re.fullmatch(r"[Rr]\s*\d+(?:[.,]\d+)?(?:\s*[±+\-].*)?", ocr_text.strip())
+        )
+        if role == "vlm_symbol" or (bare_num and not re.search(r"[Ø⌀Φφø°º]", ocr_text)):
+            local_expand = min(0.55, max(expand * 2.8, expand + 0.22))
+        crop_box = expand_bbox(list(bbox), width, height, local_expand)
+        crop = image.crop(tuple(crop_box))
+        try:
+            if generate_fn is not None:
+                text2 = generate_fn(crop, field_prompt, max_tokens)
+            elif use_mock:
+                # 无权重时沿用 OCR 初筛结果，避免整批属性被清空
+                payload = {
+                    "fields": {
+                        "text": ocr_text,
+                        "dim_kind": ocr_fields.get("dim_kind"),
+                        "basic_size": ocr_fields.get("basic_size"),
+                        "tolerance": ocr_fields.get("tolerance"),
+                        "has_tolerance": ocr_fields.get("has_tolerance"),
+                        "angle": ocr_fields.get("angle"),
+                    },
+                    "raw_text": ocr_text,
+                }
+                text2 = json.dumps(payload, ensure_ascii=False)
+            else:
+                text2 = _vlm_generate(model, processor, crop, field_prompt, max_tokens)
+            parsed = extract_json_payload_safe(text2, default={})
+            if isinstance(parsed, list) and parsed:
+                parsed = parsed[0]
+            fields = parsed.get("fields", parsed) if isinstance(parsed, dict) else {}
+            if not isinstance(fields, dict):
+                fields = {}
+            raw_text = str(parsed.get("raw_text") or "") if isinstance(parsed, dict) else ""
+            # 以 VLM 为准；若 OCR 已有 Ø/° 证据而 VLM 判空，允许规则回填，避免误杀直径/角度
+            vlm_text = str(fields.get("text") or raw_text or "").strip()
+            vlm_kind = str(fields.get("dim_kind") or "").strip().lower()
+            if vlm_kind in {"", "null", "none"}:
+                vlm_kind = ""
+            ocr_symbol = text_has_diameter_or_angle_symbol(ocr_text) or str(
+                ocr_fields.get("dim_kind") or ""
+            ).lower() in {"diameter", "angle"}
+            if not vlm_text and not vlm_kind:
+                if ocr_symbol and is_valid_dimension_mark(
+                    ocr_fields,
+                    text=ocr_text,
+                    require_dim_kind=flags["require_dim_kind"],
+                    require_basic_size=flags["require_basic_size"],
+                ):
+                    fields = dict(ocr_fields)
+                    vlm_text = ocr_text
+                    ocr_symbol_fallback += 1
+                else:
+                    rejected += 1
+                    continue
+            text_v = vlm_text or ocr_text
+            fields = enrich_dimension_fields_from_text(fields, text_v, bbox=bbox)
+            if flags["strict"]:
+                fields = clip_fields_to_schema(fields, allowed)
+            # 再次确认：声明字段外的杂讯已裁掉后，仍须是合法尺寸
+            if not is_valid_dimension_mark(
+                fields,
+                text=text_v,
+                require_dim_kind=flags["require_dim_kind"],
+                require_basic_size=flags["require_basic_size"],
+            ):
+                # OCR 已有直径/角度符号时再兜一次
+                if ocr_symbol and is_valid_dimension_mark(
+                    ocr_fields,
+                    text=ocr_text,
+                    require_dim_kind=flags["require_dim_kind"],
+                    require_basic_size=flags["require_basic_size"],
+                ):
+                    fields = enrich_dimension_fields_from_text(dict(ocr_fields), ocr_text, bbox=bbox)
+                    if flags["strict"]:
+                        fields = clip_fields_to_schema(fields, allowed)
+                    text_v = ocr_text
+                    ocr_symbol_fallback += 1
+                else:
+                    rejected += 1
+                    continue
+            if not bbox_geometry_ok(
+                bbox,
+                page_w=width,
+                page_h=height,
+                max_width_ratio=flags["max_bbox_width_ratio"],
+                max_aspect_ratio=flags["max_aspect_ratio"],
+                max_height_ratio=float(ent.get("max_bbox_height_ratio", 0.12)),
+                max_area_ratio=float(ent.get("max_bbox_area_ratio", 0.035)),
+            ):
+                rejected += 1
+                continue
+            fields["ocr_prescreen"] = True
+            fields["vlm_filtered"] = True
+            if role:
+                fields["ocr_role"] = role
+            out = dict(inst)
+            out["fields"] = fields
+            out["raw_text"] = text_v or out.get("raw_text") or ""
+            if fields.get("angle") is not None:
+                out["angle"] = fields.get("angle")
+            out["label"] = out.get("label") or ent.get("locate_query") or "number_mark"
+            kept.append(out)
+        except Exception:
+            rejected += 1
+            continue
+
+    if notes is not None:
+        notes.append(f"vlm_dim_filter={len(kept)}/{len(candidates)}")
+        notes.append(f"vlm_dim_rejected={rejected}")
+        if ocr_symbol_fallback:
+            notes.append(f"vlm_dim_ocr_symbol_fallback={ocr_symbol_fallback}")
+    return kept
+
+
+def _dimension_ent_strict_flags(ent: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "strict": bool(ent.get("strict_fields_only", True)),
+        "require_dim_kind": bool(ent.get("require_dim_kind", True)),
+        "require_basic_size": bool(ent.get("require_basic_size", True)),
+        "exclude_table_regions": bool(ent.get("exclude_table_regions", True)),
+        "max_bbox_width_ratio": float(ent.get("max_bbox_width_ratio", 0.22)),
+        "max_aspect_ratio": float(ent.get("max_aspect_ratio", 8.0)),
+        "max_bbox_height_ratio": float(ent.get("max_bbox_height_ratio", 0.12)),
+        "max_bbox_area_ratio": float(ent.get("max_bbox_area_ratio", 0.035)),
+    }
+
+
+def _finalize_dimension_instances(
+    instances: list[dict[str, Any]],
+    plan: list[dict[str, Any]],
+    *,
+    page_w: int,
+    page_h: int,
+    notes: list[str] | None = None,
+) -> list[dict[str, Any]]:
+    """严格按 drawing_parse 配置过滤尺寸属性；非尺寸/畸形框/表格内丢弃。"""
+    from pipeline.perceive_common import build_table_exclude_regions
+
+    dim_ents = {e["entity_id"]: e for e in plan if _is_dimension_marks_entity(e)}
+    if not dim_ents:
+        return instances
+
+    kept: list[dict[str, Any]] = []
+    dropped = 0
+    for inst in instances:
+        if not isinstance(inst, dict):
+            continue
+        eid = inst.get("entity_id")
+        ent = dim_ents.get(eid)
+        if not ent:
+            kept.append(inst)
+            continue
+        flags = _dimension_ent_strict_flags(ent)
+        allowed = [str(f.get("name")) for f in (ent.get("fields") or []) if f.get("name")]
+        fields = dict(inst.get("fields") or {})
+        text_v = str(fields.get("text") or inst.get("raw_text") or "")
+        fields = enrich_dimension_fields_from_text(fields, text_v, bbox=inst.get("bbox"))
+        if flags["strict"]:
+            fields = clip_fields_to_schema(fields, allowed)
+        # 全图/分块 VLM 定位的尺寸视为已确认（避免 sanitize 按 vlm_require 误杀）
+        fields["vlm_filtered"] = True
+        inst = dict(inst)
+        inst["fields"] = fields
+        if fields.get("text"):
+            inst["raw_text"] = fields.get("text")
+        if fields.get("angle") is not None:
+            inst["angle"] = fields.get("angle")
+
+        if not bbox_geometry_ok(
+            inst.get("bbox"),
+            page_w=page_w,
+            page_h=page_h,
+            max_width_ratio=flags["max_bbox_width_ratio"],
+            max_aspect_ratio=flags["max_aspect_ratio"],
+            max_height_ratio=flags["max_bbox_height_ratio"],
+            max_area_ratio=flags["max_bbox_area_ratio"],
+        ):
+            dropped += 1
+            continue
+        if not is_valid_dimension_mark(
+            fields,
+            text=text_v,
+            require_dim_kind=flags["require_dim_kind"],
+            require_basic_size=flags["require_basic_size"],
+        ):
+            dropped += 1
+            continue
+        kept.append(inst)
+
+    if any(_dimension_ent_strict_flags(e)["exclude_table_regions"] for e in dim_ents.values()):
+        pad = max(
+            (float(e.get("exclude_table_pad", 2.0)) for e in dim_ents.values()),
+            default=2.0,
+        )
+        expand_up = max(
+            (float(e.get("exclude_table_expand_up", 0.12)) for e in dim_ents.values()),
+            default=0.12,
+        )
+        table_regions = build_table_exclude_regions(
+            instances,
+            page_w=page_w,
+            page_h=page_h,
+            pad=pad,
+            expand_up_frac=expand_up,
+        )
+        if table_regions:
+            dim_only = [i for i in kept if i.get("entity_id") in dim_ents]
+            other = [i for i in kept if i.get("entity_id") not in dim_ents]
+            filtered, n_tab = filter_instances_outside_bboxes(
+                dim_only, table_regions, pad=0.0, entity_ids=None
+            )
+            dropped += n_tab
+            kept = other + filtered
+            if notes is not None:
+                notes.append(f"dimension_exclude_table_regions={n_tab}")
+
+    if notes is not None:
+        notes.append(f"dimension_strict_dropped={dropped}")
+    return kept
 
 
 def _build_plan_prompt(plan: list[dict[str, Any]], *, locate_only: bool = False) -> str:
@@ -703,6 +1006,9 @@ def perceive_qwen_vl(
             else:
                 box_inst = {k: v for k, v in box_inst.items() if not str(k).startswith("_")}
             instances.append(box_inst)
+        instances = _finalize_dimension_instances(
+            instances, plan, page_w=width, page_h=height, notes=notes
+        )
         timing = _snapshot_vlm_timing(wall_s=time.perf_counter() - wall_t0)
         print(
             f"[timing] qwen_vl wall={timing['wall_s']:.2f}s "
@@ -766,6 +1072,9 @@ def perceive_qwen_vl(
             if str(k).startswith("_"):
                 del inst[k]
         instances[i] = inst
+    instances = _finalize_dimension_instances(
+        instances, plan, page_w=width, page_h=height, notes=notes
+    )
     timing = _snapshot_vlm_timing(wall_s=time.perf_counter() - wall_t0)
     print(
         f"[timing] qwen_vl wall={timing['wall_s']:.2f}s "

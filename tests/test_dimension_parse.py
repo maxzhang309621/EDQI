@@ -80,6 +80,45 @@ def test_angle():
     assert out["has_tolerance"] is False
 
 
+def test_ocr_symbol_misreads_diameter_and_angle():
+    """OCR 常把 Ø 读成 O/Q/D，把 ° 读成 o。"""
+    assert parse_dimension_text("O12")["dim_kind"] == "diameter"
+    assert parse_dimension_text("Q8.5")["basic_size"] == "8.5"
+    assert parse_dimension_text("45o")["dim_kind"] == "angle"
+    assert parse_dimension_text("30O")["dim_kind"] == "angle"
+
+
+def test_reject_max_min_typ_prefix():
+    assert parse_dimension_text("Max. 3")["dim_kind"] is None
+    assert parse_dimension_text("max.3")["basic_size"] is None
+    assert parse_dimension_text("TYP 5")["dim_kind"] is None
+    assert parse_dimension_text("MIN0.2")["dim_kind"] is None
+
+
+def test_dedupe_prefers_specific_kind():
+    from pipeline.dimension_parse import dedupe_dimension_attribute_instances
+
+    a = {
+        "entity_id": "number_mark",
+        "bbox": [10, 10, 40, 30],
+        "confidence": 0.95,
+        "raw_text": "12",
+        "fields": {"text": "12", "dim_kind": "length", "basic_size": "12"},
+    }
+    b = {
+        "entity_id": "number_mark",
+        "bbox": [12, 11, 42, 31],
+        "confidence": 0.8,
+        "raw_text": "O12",
+        "fields": {"text": "O12", "dim_kind": "diameter", "basic_size": "12", "vlm_filtered": True},
+    }
+    out, n = dedupe_dimension_attribute_instances([a, b])
+    marks = [i for i in out if i.get("entity_id") == "number_mark"]
+    assert n == 1
+    assert len(marks) == 1
+    assert marks[0]["fields"]["dim_kind"] == "diameter"
+
+
 def test_overlap_instances_skip_dimension_parse():
     """重叠 keep_pair 只标跳过，不做 dim_kind/basic_size 等属性解析。"""
     text_ok = f"{DIA}12{PM}0.1"
