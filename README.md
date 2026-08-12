@@ -52,6 +52,18 @@ python -m pipeline.review_queue resolve work_dirs/review_queue/xxx.json --decisi
 
 感知缓存与大图分块默认开启，配置见 `configs/default.yaml` 的 `perception:` 段。
 
+**清空感知缓存**（改配置/换模型/结果异常时建议先清，否则可能命中旧缓存）：
+
+```bash
+# Linux / autodl
+rm -rf work_dirs/cache/perception work_dirs/cache/tiles
+```
+
+```powershell
+# Windows PowerShell（项目根目录）
+Remove-Item -Recurse -Force "work_dirs\cache\perception","work_dirs\cache\tiles" -ErrorAction SilentlyContinue
+```
+
 **常驻推理（推荐，避免每次重载 VLM）**：
 
 ```bash

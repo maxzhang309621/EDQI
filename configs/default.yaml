@@ -12,8 +12,8 @@ perception_backend: qwen_vl
 perception:
   cache_enabled: true
   cache_dir: work_dirs/cache/perception
-  # false：整图 VL 定位。true 时 number_mark 分块易出「右半幅细长条」假框（尤其 2B）
-  tile_enabled: false
+  # true：与 main 一致，对 number_mark 等做分块定位（8B 全图属性召回更好）
+  tile_enabled: true
   tile_size: 1280
   tile_overlap: 0.2
   tile_dir: work_dirs/cache/tiles
