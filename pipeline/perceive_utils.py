@@ -259,13 +259,7 @@ def perceive_with_cache_and_tiles(
             notes.append(f"cache_hit:{ent['entity_id']}")
             continue
 
-        use_tiles = (
-            tile_enabled
-            and max(width, height) > tile_size
-            # 尺寸 number_mark 分块易出半页假框；表格已单独批次，此处禁 tile
-            and str(ent.get("parse_kind") or "").lower() != "dimension_marks"
-            and str(ent.get("entity_id") or "") not in {"number_mark", "annotation", "annotations"}
-        )
+        use_tiles = tile_enabled and max(width, height) > tile_size
         collected: list[dict[str, Any]] = []
         if not use_tiles:
             payload = perceive_fn(image_path, [ent], meta, config, allow_mock_fallback=True)
