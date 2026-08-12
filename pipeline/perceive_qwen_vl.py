@@ -241,15 +241,15 @@ def _dimension_marks_pass2_prompt(ent: dict[str, Any]) -> str:
         f"fields 只允许这些键（不得增删）: {allow_s}\n"
         "若不是尺寸标注，全部字段填 null，raw_text=\"\"（宁缺毋滥）。\n"
         f"字段说明: {field_desc}\n"
-        "分工提示：OCR 已擅长半径 R 与普通长度；本轮请重点用图像识别直径符与角度符。\n"
         "规则:\n"
-        "- 优先检查数字旁是否有 Ø/⌀/Φ（直径）或 °（角度）；有则 dim_kind=diameter|angle，"
-        "并在 text 中写出符号（如 Ø10、45°），即使 OCR 原文没有该符号；\n"
-        "- R/r 后直接跟数字 → radius；普通长度数值/±公差 → length；\n"
-        "- 一律拒绝：Max./MIN/TYP/REF、粗糙度(Rz/Ra)、视图字母、气泡号、图号、表值、残片；\n"
+        "- 仅接受 Ø/⌀/Φ 直径、R 半径（R 后直接跟数字，如 R2/R40）、长度数值、角度°、以及带 ± 公差的尺寸；\n"
+        "- 若数字旁可见直径符(Ø/φ)或角度符(°)，即使 OCR 文本没写出该符号，也必须判为 diameter/angle，"
+        "并在 text 中补上符号（如 Ø10、45°）；\n"
+        "- 一律拒绝：Max./MIN/TYP/REF 等非尺寸词头、表面粗糙度(Rz/Ra)、视图字母(A/B)、气泡序号、"
+        "图号、材料/表格数值、标题栏文字、残片、任何非尺寸文本；\n"
         "- dim_kind 只能是 diameter|radius|length|angle，否则 null；\n"
         "- basic_size=基本尺寸；tolerance=公差（无则 null）；has_tolerance 为布尔；\n"
-        "- angle=文本相对水平线朝向角（度，竖排≈±90）；\n"
+        "- angle=相对水平线朝向角（度）；\n"
         "- 禁止输出未声明字段，禁止编造，禁止把非尺寸硬套成 length。\n"
         "格式: {\"fields\":{...},\"raw_text\":\"...\"}"
     )
@@ -312,15 +312,14 @@ def filter_ocr_dimension_candidates_with_vlm(
             continue
         ocr_fields = dict(inst.get("fields") or {})
         ocr_text = str(inst.get("raw_text") or ocr_fields.get("text") or "")
-        # 纯数字 / OCR 标成待 VLM 认符号：加大裁剪以看见 Ø/°
+        # 纯数字候选：Ø/° 常落在框外，加大裁剪让 VLM 看见符号
         local_expand = expand
-        role = str(ocr_fields.get("ocr_role") or "")
         bare_num = bool(
             re.fullmatch(r"[±+\-]?\d+(?:[.,]\d+)?", ocr_text.strip())
             or re.fullmatch(r"[Rr]\s*\d+(?:[.,]\d+)?(?:\s*[±+\-].*)?", ocr_text.strip())
         )
-        if role == "vlm_symbol" or (bare_num and not re.search(r"[Ø⌀Φφø°º]", ocr_text)):
-            local_expand = min(0.45, max(expand * 2.4, expand + 0.18))
+        if bare_num and not re.search(r"[Ø⌀Φφø°º]", ocr_text):
+            local_expand = min(0.42, max(expand * 2.2, expand + 0.15))
         crop_box = expand_bbox(list(bbox), width, height, local_expand)
         crop = image.crop(tuple(crop_box))
         try:
