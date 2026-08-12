@@ -42,10 +42,13 @@ objects:
     # 覆盖全部配置斜向角（首读成功则不会跑满）
     vlm_orientation_retry_max: 8
     vlm_oblique_angles: [30, 60, 120, 150, 210, 240, 300, 330]
-    # backend=ocr 时：用 tables 定位框剔除框内数字；vlm 路径由提示词排除表格区
+    # 尺寸属性排除表格框：vlm/ocr 均生效（框内数字不当尺寸）
     exclude_table_regions: true
     exclude_table_pad: 2
     exclude_table_expand_up: 0.12
+    # VLM 属性：不识别 OCR 已确认重叠（keep_pair）的文本区域
+    exclude_overlap_pairs: true
+    exclude_overlap_iou: 0.25
     fields:
       - name: text
         parse_hint: 尺寸标注可见原文（按正向阅读顺序写出，勿因倾斜颠倒数字）

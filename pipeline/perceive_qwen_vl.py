@@ -15,8 +15,12 @@ from PIL import Image
 from pipeline import load_config, model_path_ready, resolve_model_source, resolve_path
 from pipeline.dimension_parse import enrich_dimension_fields_from_text, parse_dimension_text
 from pipeline.perceive_common import (
+    build_table_exclude_regions,
+    collect_table_value_tokens,
     expand_bbox,
     extract_json_payload_safe,
+    filter_instances_matching_table_values,
+    filter_instances_outside_bboxes,
     mock_perceive,
     norm_bbox_to_pixels,
 )
@@ -219,8 +223,10 @@ def _dimension_marks_locate_rules() -> list[str]:
         "只定位视图中的尺寸数字与公差标注（含 Ø/⌀/Φ 直径、R 半径、长度、角度°、±公差）。",
         "必须同时检出水平、竖排，以及约 30°/60°/120°/150°/210°/240°/300°/330° 等斜向尺寸文字；"
         "竖排/倾斜的数字也要各自给出 bbox，勿因朝向漏检。",
-        "禁止定位：标题栏/图框表格文字、图号、材料牌号、BOM、Siemens/版权、比例、页码、"
+        "禁止定位：标题栏/图框表格内任何文字与数字（material_table / main_table 框内一律不要）、"
+        "图号、材料牌号、BOM、Siemens/版权、比例、页码、"
         "零件名、表面粗糙度符号旁的非尺寸长串、坐标轴刻度。",
+        "只定位视图区尺寸标注；表格框内即使有数字也禁止输出 bbox。",
         "每个独立尺寸标注各一个 bbox；重叠/压盖的尺寸也要分开框。",
     ]
 
@@ -231,7 +237,7 @@ def _dimension_marks_pass2_prompt(ent: dict[str, Any]) -> str:
         "读取该局部图中的工程尺寸标注属性。只输出 JSON。\n"
         "局部图可能已旋转至近水平；也可能仍含竖排或倾斜文字——按工程图正向阅读顺序识读，"
         "勿把竖排数字读反或漏读。\n"
-        "若裁剪区不是尺寸标注（图号/材料/标题栏等），fields 全部填 null。\n"
+        "若裁剪区不是尺寸标注（图号/材料/标题栏/表格单元格等），fields 全部填 null。\n"
         f"字段: {field_desc}\n"
         "规则:\n"
         "- text=可见原文（正向阅读，如竖排 12 仍写 \"12\"，不要写成倒序）；\n"
@@ -419,6 +425,57 @@ def _read_dimension_crop_with_orientation(
     return best_fields, best_raw
 
 
+def _dimension_entity_ids(plan: list[dict[str, Any]]) -> set[str]:
+    return {str(e["entity_id"]) for e in plan if _is_dimension_marks_entity(e) and e.get("entity_id")}
+
+
+def _filter_dimension_marks_in_table_regions(
+    instances: list[dict[str, Any]],
+    *,
+    plan: list[dict[str, Any]],
+    page_w: int,
+    page_h: int,
+    notes: list[str] | None = None,
+) -> list[dict[str, Any]]:
+    """丢掉落在表格排除区内的尺寸属性框（保留表格实体本身）。"""
+    dim_ents = [e for e in plan if _is_dimension_marks_entity(e)]
+    if not dim_ents:
+        return instances
+    if not any(bool(e.get("exclude_table_regions", True)) for e in dim_ents):
+        return instances
+    dim_eids = _dimension_entity_ids(plan)
+    if not dim_eids:
+        return instances
+    ent0 = dim_ents[0]
+    exclude_bbs = build_table_exclude_regions(
+        instances,
+        page_w=page_w,
+        page_h=page_h,
+        pad=float(ent0.get("exclude_table_pad", 2.0)),
+        expand_up_frac=float(ent0.get("exclude_table_expand_up", 0.12)),
+    )
+    if not exclude_bbs:
+        return instances
+    kept, dropped = filter_instances_outside_bboxes(
+        instances,
+        exclude_bbs,
+        pad=0.0,
+        entity_ids=dim_eids,
+    )
+    if dropped and notes is not None:
+        notes.append(f"dimension_exclude_table_boxes={dropped}")
+    # 再用表格字段值剔除误检（图号/材料等）
+    tokens = collect_table_value_tokens(kept)
+    kept2, dropped_txt = filter_instances_matching_table_values(
+        kept,
+        tokens,
+        entity_ids=dim_eids,
+    )
+    if dropped_txt and notes is not None:
+        notes.append(f"dimension_exclude_table_texts={dropped_txt}")
+    return kept2
+
+
 def _build_plan_prompt(plan: list[dict[str, Any]], *, locate_only: bool = False) -> str:
     has_dims = any(_is_dimension_marks_entity(e) for e in plan)
     if locate_only:
@@ -465,7 +522,7 @@ def _build_plan_prompt(plan: list[dict[str, Any]], *, locate_only: bool = False)
             mode = ent.get("read_mode") or "cell_content"
             table_hint = f"【整表一个框|section={ent.get('section')}|read_mode={mode}】"
         dim_hint = (
-            "【尺寸属性|含竖排/倾斜|排除标题栏/图号/材料】"
+            "【尺寸属性|含竖排/斜向|禁止表格框内|排除标题栏/图号/材料】"
             if _is_dimension_marks_entity(ent)
             else ""
         )
@@ -794,6 +851,10 @@ def perceive_qwen_vl(
             image, boxes, page_w=width, page_h=height, plan=plan
         )
         notes.extend(bound_notes)
+        # Pass2 前剔除表格框内的尺寸定位，避免对标题栏数字做属性识读
+        boxes = _filter_dimension_marks_in_table_regions(
+            boxes, plan=plan, page_w=width, page_h=height, notes=notes
+        )
 
         instances = []
         for box_inst in boxes:
@@ -894,6 +955,10 @@ def perceive_qwen_vl(
             else:
                 box_inst = {k: v for k, v in box_inst.items() if not str(k).startswith("_")}
             instances.append(box_inst)
+        # 表格字段已填后，再按表格取值剔除误检尺寸
+        instances = _filter_dimension_marks_in_table_regions(
+            instances, plan=plan, page_w=width, page_h=height, notes=notes
+        )
         timing = _snapshot_vlm_timing(wall_s=time.perf_counter() - wall_t0)
         print(
             f"[timing] qwen_vl wall={timing['wall_s']:.2f}s "
@@ -957,6 +1022,9 @@ def perceive_qwen_vl(
             if str(k).startswith("_"):
                 del inst[k]
         instances[i] = inst
+    instances = _filter_dimension_marks_in_table_regions(
+        instances, plan=plan, page_w=width, page_h=height, notes=notes
+    )
     timing = _snapshot_vlm_timing(wall_s=time.perf_counter() - wall_t0)
     print(
         f"[timing] qwen_vl wall={timing['wall_s']:.2f}s "

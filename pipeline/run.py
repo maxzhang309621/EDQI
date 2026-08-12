@@ -23,6 +23,7 @@ from pipeline.ingest import ingest
 from pipeline.perceive_common import (
     build_table_exclude_regions,
     collect_table_value_tokens,
+    filter_dimension_marks_matching_overlap_pairs,
     filter_instances_matching_table_values,
     filter_instances_outside_bboxes,
     mock_perceive,
@@ -223,12 +224,12 @@ def perceive(
         dim_vlm = is_dimension_marks_vlm(config)
         exclude_bbs: list[list[int]] = []
         table_tokens: set[str] = set()
-        # 仅 OCR 属性路径需要按表格框过滤 OCR；VLM 属性时重叠 OCR 独立，不做表格剔除
-        if (not dim_vlm) and bool(dim_cfg.get("exclude_table_regions", True)):
-            page_w = int(meta.get("width") or 0)
-            page_h = int(meta.get("height") or 0)
-            exclude_pad = float(dim_cfg.get("exclude_table_pad", 2.0))
-            expand_up = float(dim_cfg.get("exclude_table_expand_up", 0.12))
+        page_w = int(meta.get("width") or 0)
+        page_h = int(meta.get("height") or 0)
+        exclude_pad = float(dim_cfg.get("exclude_table_pad", 2.0))
+        expand_up = float(dim_cfg.get("exclude_table_expand_up", 0.12))
+        # OCR 属性路径：按表格框过滤 OCR；VLM 属性路径：过滤 VLM 尺寸框 + 表格字段值
+        if bool(dim_cfg.get("exclude_table_regions", True)):
             exclude_bbs = build_table_exclude_regions(
                 vl_payload.get("instances") or [],
                 page_w=page_w,
@@ -237,15 +238,33 @@ def perceive(
                 expand_up_frac=expand_up,
             )
             table_tokens = collect_table_value_tokens(vl_payload.get("instances") or [])
+        if dim_vlm and bool(dim_cfg.get("exclude_table_regions", True)):
+            dim_eids = {str(dim_cfg.get("entity_id") or "number_mark")}
+            for e in vl_plan:
+                if str(e.get("parse_kind") or "").lower() == "dimension_marks" and e.get("entity_id"):
+                    dim_eids.add(str(e["entity_id"]))
+            vl_insts = list(vl_payload.get("instances") or [])
+            vl_insts, drop_box = filter_instances_outside_bboxes(
+                vl_insts, exclude_bbs, pad=0.0, entity_ids=dim_eids
+            )
+            vl_insts, drop_txt = filter_instances_matching_table_values(
+                vl_insts, table_tokens, entity_ids=dim_eids
+            )
+            vl_notes = list(vl_payload.get("notes") or [])
+            if drop_box:
+                vl_notes.append(f"vlm_dimension_exclude_table_boxes={drop_box}")
+            if drop_txt:
+                vl_notes.append(f"vlm_dimension_exclude_table_texts={drop_txt}")
+            vl_payload = {**vl_payload, "instances": vl_insts, "notes": vl_notes}
         ocr_payload = perceive_number_overlap(
             image_path,
             ocr_plan,
             meta,
             config,
             rules=rules,
-            exclude_bboxes=exclude_bbs or None,
+            exclude_bboxes=(exclude_bbs or None) if not dim_vlm else None,
             exclude_pad=0.0,
-            exclude_table_texts=table_tokens or None,
+            exclude_table_texts=(table_tokens or None) if not dim_vlm else None,
         )
         ocr_instances = list(ocr_payload.get("instances") or [])
         if dim_vlm:
@@ -256,6 +275,24 @@ def perceive(
             ocr_notes = list(ocr_payload.get("notes") or [])
             ocr_notes.append(f"ocr_keep_pair_only={len(ocr_instances)}/{before}")
             ocr_payload["notes"] = ocr_notes
+            # VLM 尺寸属性去掉与重叠对重合的框，避免对重叠文本再做属性识读
+            if bool(dim_cfg.get("exclude_overlap_pairs", True)) and ocr_instances:
+                dim_eids = {str(dim_cfg.get("entity_id") or "number_mark")}
+                for e in vl_plan:
+                    if str(e.get("parse_kind") or "").lower() == "dimension_marks" and e.get("entity_id"):
+                        dim_eids.add(str(e["entity_id"]))
+                iou_thr = float(dim_cfg.get("exclude_overlap_iou", 0.25))
+                vl_insts = list(vl_payload.get("instances") or [])
+                vl_insts, drop_ov = filter_dimension_marks_matching_overlap_pairs(
+                    vl_insts,
+                    ocr_instances,
+                    entity_ids=dim_eids,
+                    iou_thr=iou_thr,
+                )
+                vl_notes = list(vl_payload.get("notes") or [])
+                if drop_ov:
+                    vl_notes.append(f"vlm_dimension_exclude_overlap_pairs={drop_ov}")
+                vl_payload = {**vl_payload, "instances": vl_insts, "notes": vl_notes}
         merged = _merge_instance_payloads(
             vl_payload,
             ocr_payload,

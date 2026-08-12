@@ -281,6 +281,66 @@ def filter_instances_outside_bboxes(
     return keep, dropped
 
 
+def filter_dimension_marks_matching_overlap_pairs(
+    instances: list[dict[str, Any]] | None,
+    overlap_pairs: list[dict[str, Any]] | None,
+    *,
+    entity_ids: set[str] | frozenset[str] | None = None,
+    iou_thr: float = 0.25,
+) -> tuple[list[dict[str, Any]], int]:
+    """丢掉与已确认重叠文本（keep_pair）空间重合的尺寸属性实例。
+
+    匹配条件：IoU≥阈值，或尺寸框中心落在重叠框内。
+    重叠实例本身不由此函数处理（应单独保留 keep_pair）。
+    """
+    from pipeline.perceive_utils import iou_xyxy
+
+    items = list(instances or [])
+    pairs = [
+        p
+        for p in (overlap_pairs or [])
+        if isinstance(p, dict) and p.get("keep_pair") and p.get("bbox") and len(p.get("bbox") or []) == 4
+    ]
+    if not pairs:
+        return items, 0
+    eids = entity_ids
+    keep: list[dict[str, Any]] = []
+    dropped = 0
+    for inst in items:
+        if not isinstance(inst, dict):
+            continue
+        eid = str(inst.get("entity_id") or "")
+        if eids is not None and eid not in eids:
+            keep.append(inst)
+            continue
+        # 已是重叠证据则保留（一般不会出现在 VLM 列表）
+        if inst.get("keep_pair"):
+            keep.append(inst)
+            continue
+        bbox = inst.get("bbox")
+        if not bbox or len(bbox) != 4:
+            keep.append(inst)
+            continue
+        hit = False
+        center = bbox_center_xy(bbox)
+        for pair in pairs:
+            pb = pair["bbox"]
+            try:
+                if iou_xyxy([float(x) for x in bbox], [float(x) for x in pb]) >= float(iou_thr):
+                    hit = True
+                    break
+            except (TypeError, ValueError):
+                pass
+            if center is not None and point_in_bbox(center[0], center[1], pb, pad=0.0):
+                hit = True
+                break
+        if hit:
+            dropped += 1
+            continue
+        keep.append(inst)
+    return keep, dropped
+
+
 def _strip_code_fence(text: str) -> str:
     """去掉 ``` / ```json 围栏；兼容模型截断导致未闭合的情况。"""
     text = text.strip()

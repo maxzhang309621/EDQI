@@ -100,11 +100,67 @@ def test_looks_like_rejects_tableish_text():
     assert _looks_like_number_mark("-sheet DINEN13599 Cu-ETP-R290") is False
 
 
-def test_dimension_marks_default_exclude_flag():
-    from pipeline import load_config
-    from pipeline.drawing_parse_plan import build_drawing_parse_plan
+def test_filter_dimension_marks_matching_overlap_pairs():
+    from pipeline.perceive_common import filter_dimension_marks_matching_overlap_pairs
 
-    cfg = load_config(ROOT / "configs" / "default.yaml")
-    plan = build_drawing_parse_plan(cfg, enabled=True)
-    dim = next(e for e in plan if e.get("parse_kind") == "dimension_marks")
-    assert dim.get("exclude_table_regions") is True
+    vl = [
+        {"entity_id": "main_table", "bbox": [0, 0, 100, 100], "fields": {}},
+        {"entity_id": "number_mark", "bbox": [100, 100, 140, 140], "fields": {"text": "12"}, "raw_text": "12"},
+        {"entity_id": "number_mark", "bbox": [500, 500, 540, 540], "fields": {"text": "R5"}, "raw_text": "R5"},
+    ]
+    pairs = [
+        {
+            "entity_id": "number_mark",
+            "bbox": [105, 105, 145, 145],
+            "keep_pair": True,
+            "fields": {"text": "12", "overlap_reason": "ink"},
+        }
+    ]
+    kept, dropped = filter_dimension_marks_matching_overlap_pairs(
+        vl, pairs, entity_ids={"number_mark"}, iou_thr=0.25
+    )
+    assert dropped == 1
+    assert any(i.get("raw_text") == "R5" for i in kept)
+    assert not any(i.get("entity_id") == "number_mark" and i.get("raw_text") == "12" for i in kept)
+    assert any(i.get("entity_id") == "main_table" for i in kept)
+
+
+def test_filter_vlm_dimension_marks_in_table_regions():
+    from pipeline.perceive_qwen_vl import _filter_dimension_marks_in_table_regions
+
+    plan = [
+        {
+            "entity_id": "number_mark",
+            "parse_kind": "dimension_marks",
+            "exclude_table_regions": True,
+            "exclude_table_pad": 0,
+            "exclude_table_expand_up": 0,
+        },
+        {"entity_id": "main_table", "parse_kind": "table", "section": "main"},
+    ]
+    instances = [
+        {
+            "entity_id": "main_table",
+            "bbox": [200, 200, 600, 600],
+            "fields": {"document_number": "25001745002A"},
+        },
+        {"entity_id": "number_mark", "bbox": [300, 300, 340, 340], "fields": {"text": "12"}, "raw_text": "12"},
+        {"entity_id": "number_mark", "bbox": [10, 10, 40, 40], "fields": {"text": "R5"}, "raw_text": "R5"},
+        {
+            "entity_id": "number_mark",
+            "bbox": [700, 700, 740, 740],
+            "fields": {"text": "25001745002A"},
+            "raw_text": "25001745002A",
+        },
+    ]
+    notes: list[str] = []
+    out = _filter_dimension_marks_in_table_regions(
+        instances, plan=plan, page_w=1000, page_h=1000, notes=notes
+    )
+    assert any(i["entity_id"] == "main_table" for i in out)
+    assert any(i["entity_id"] == "number_mark" and i.get("raw_text") == "R5" for i in out)
+    assert not any(i["entity_id"] == "number_mark" and i.get("raw_text") == "12" for i in out)
+    assert not any(
+        i["entity_id"] == "number_mark" and "25001745002A" in str(i.get("raw_text")) for i in out
+    )
+    assert any(n.startswith("dimension_exclude_table") for n in notes)

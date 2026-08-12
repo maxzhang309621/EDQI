@@ -172,6 +172,9 @@ def _normalize_dimension_marks_block(block: dict[str, Any]) -> dict[str, Any] | 
         "exclude_table_regions": bool(block.get("exclude_table_regions", True)),
         "exclude_table_pad": float(block.get("exclude_table_pad", 2.0)),
         "exclude_table_expand_up": float(block.get("exclude_table_expand_up", 0.12)),
+        # VLM 属性：去掉与 OCR 已确认重叠对（keep_pair）重合的尺寸框
+        "exclude_overlap_pairs": bool(block.get("exclude_overlap_pairs", True)),
+        "exclude_overlap_iou": float(block.get("exclude_overlap_iou", 0.25)),
     }
 
 
