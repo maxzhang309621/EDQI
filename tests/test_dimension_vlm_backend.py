@@ -1,8 +1,10 @@
-"""尺寸属性 backend=vlm：路由、字段补齐、合并只留 keep_pair。"""
+"""尺寸属性 backend=vlm：路由、字段补齐、合并只留 keep_pair、倾斜 deskew。"""
 from __future__ import annotations
 
 import sys
 from pathlib import Path
+
+from PIL import Image
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -11,6 +13,7 @@ from pipeline.dimension_parse import enrich_dimension_fields_from_text
 from pipeline.drawing_parse_plan import (
     build_drawing_parse_plan,
     dimension_marks_backend,
+    get_dimension_marks_config,
     is_dimension_marks_vlm,
     merge_perception_plans,
     split_plan_for_backends,
@@ -18,7 +21,10 @@ from pipeline.drawing_parse_plan import (
 from pipeline import load_config
 from engines import collect_entities, load_rules
 from pipeline.perceive_qwen_vl import (
+    _deskew_crop_for_vlm,
     _dimension_marks_pass2_prompt,
+    _dimension_pass2_angles,
+    _dimension_read_looks_weak,
     _is_dimension_marks_entity,
 )
 
@@ -57,18 +63,58 @@ def test_enrich_preserves_vlm_values_and_fills_angle():
     assert fields["angle"] == 90.0
 
 
-def test_dimension_pass2_prompt_mentions_exclusions():
+def test_dimension_pass2_prompt_mentions_tilt_and_exclusions():
     ent = {
         "parse_kind": "dimension_marks",
         "fields": [
             {"name": "text", "parse_hint": "原文"},
             {"name": "dim_kind", "parse_hint": "diameter|radius"},
+            {"name": "angle", "parse_hint": "朝向角"},
         ],
     }
     assert _is_dimension_marks_entity(ent)
     prompt = _dimension_marks_pass2_prompt(ent)
     assert "dim_kind" in prompt
     assert "angle" in prompt
+    assert "竖排" in prompt or "倾斜" in prompt
+
+
+def test_vlm_deskew_config_defaults():
+    cfg = load_config(ROOT / "configs" / "default.yaml")
+    block = get_dimension_marks_config(cfg)
+    assert block.get("vlm_deskew_reread", True) is True
+    plan = build_drawing_parse_plan(cfg)
+    dim = next(e for e in plan if e.get("parse_kind") == "dimension_marks")
+    assert dim.get("vlm_deskew_reread") is True
+    assert dim.get("vlm_orientation_retry") is True
+    assert int(dim.get("vlm_orientation_retry_max", 0)) >= 1
+
+
+def test_dimension_pass2_angles_vertical_and_square():
+    ent = {
+        "vlm_deskew_reread": True,
+        "vlm_deskew_min_angle": 8,
+        "vlm_orientation_retry": True,
+        "vlm_orientation_retry_max": 2,
+    }
+    vert = _dimension_pass2_angles([10, 10, 20, 80], ent)
+    assert vert[0] == 90.0
+    assert -90.0 in vert
+    square = _dimension_pass2_angles([10, 10, 40, 40], ent)
+    assert square[0] == 0.0
+    assert 90.0 in square
+
+
+def test_deskew_crop_rotates_and_upsizes():
+    img = Image.new("RGB", (20, 60), (255, 255, 255))
+    out = _deskew_crop_for_vlm(img, 90.0, min_side=64)
+    assert max(out.size) >= 64
+
+
+def test_dimension_read_looks_weak():
+    assert _dimension_read_looks_weak({}) is True
+    assert _dimension_read_looks_weak({"text": "abc"}) is True
+    assert _dimension_read_looks_weak({"text": "12±0.1", "dim_kind": "length", "basic_size": "12"}) is False
 
 
 def test_vlm_merge_keeps_only_overlap_pairs():

@@ -13,7 +13,7 @@ from typing import Any
 from PIL import Image
 
 from pipeline import load_config, model_path_ready, resolve_model_source, resolve_path
-from pipeline.dimension_parse import enrich_dimension_fields_from_text
+from pipeline.dimension_parse import enrich_dimension_fields_from_text, parse_dimension_text
 from pipeline.perceive_common import (
     expand_bbox,
     extract_json_payload_safe,
@@ -24,6 +24,7 @@ from pipeline.table_layout_ocr import (
     apply_product_split_to_boxes,
     extract_fields_above_labels,
 )
+from pipeline.text_angle import normalize_text_angle, text_angle_from_bbox
 
 _VLM = None
 _PROCESSOR = None
@@ -216,6 +217,8 @@ def _dimension_marks_locate_rules() -> list[str]:
     return [
         "对于尺寸标注（parse_kind=dimension_marks / number_mark）：",
         "只定位视图中的尺寸数字与公差标注（含 Ø/⌀/Φ 直径、R 半径、长度、角度°、±公差）。",
+        "必须同时检出水平、竖排（沿尺寸线垂直书写）以及大角度倾斜的尺寸文字；"
+        "竖排/倾斜的数字也要各自给出 bbox，勿因朝向漏检。",
         "禁止定位：标题栏/图框表格文字、图号、材料牌号、BOM、Siemens/版权、比例、页码、"
         "零件名、表面粗糙度符号旁的非尺寸长串、坐标轴刻度。",
         "每个独立尺寸标注各一个 bbox；重叠/压盖的尺寸也要分开框。",
@@ -226,15 +229,147 @@ def _dimension_marks_pass2_prompt(ent: dict[str, Any]) -> str:
     field_desc = json_fields(ent)
     return (
         "读取该局部图中的工程尺寸标注属性。只输出 JSON。\n"
+        "局部图可能已旋转至近水平；也可能仍含竖排或倾斜文字——按工程图正向阅读顺序识读，"
+        "勿把竖排数字读反或漏读。\n"
         "若裁剪区不是尺寸标注（图号/材料/标题栏等），fields 全部填 null。\n"
         f"字段: {field_desc}\n"
         "规则:\n"
-        "- text=可见原文；dim_kind=diameter|radius|length|angle|null；\n"
+        "- text=可见原文（正向阅读，如竖排 12 仍写 \"12\"，不要写成倒序）；\n"
+        "- dim_kind=diameter|radius|length|angle|null；\n"
         "- basic_size=基本尺寸（±前）；tolerance=公差（±后，无则 null）；\n"
         "- has_tolerance=是否标明公差（布尔）；\n"
-        "- angle=文本相对水平线朝向角（度，水平≈0，竖排≈90 或 -90）。\n"
+        "- angle=原图中文本相对水平线朝向角（度：水平≈0，竖排≈90 或 -90，"
+        "倾斜约 ±30~±60；与局部图是否已旋转无关，填原图朝向）。\n"
         "禁止编造。格式: {\"fields\":{...},\"raw_text\":\"...\"}"
     )
+
+
+def _deskew_crop_for_vlm(crop: Image.Image, angle_deg: float, *, min_side: int = 64) -> Image.Image:
+    """将裁剪旋到近水平，过小则放大，便于 VLM 识读竖排/倾斜尺寸。"""
+    ang = float(angle_deg)
+    while ang < -180.0:
+        ang += 360.0
+    while ang > 180.0:
+        ang -= 360.0
+    out = crop
+    if abs(ang) >= 1e-3:
+        out = crop.rotate(-ang, expand=True, fillcolor=(255, 255, 255))
+    dw, dh = out.size
+    if max(dw, dh) < min_side and max(dw, dh) > 0:
+        scale = float(min_side) / float(max(dw, dh))
+        out = out.resize(
+            (max(1, int(dw * scale)), max(1, int(dh * scale))),
+            Image.Resampling.LANCZOS,
+        )
+    return out
+
+
+def _dimension_read_looks_weak(fields: dict[str, Any] | None) -> bool:
+    """Pass2 结果是否过弱，值得换朝向再试。"""
+    f = fields if isinstance(fields, dict) else {}
+    text = str(f.get("text") or "").strip()
+    if not text:
+        return True
+    parsed = parse_dimension_text(text)
+    if parsed.get("dim_kind") is None and f.get("dim_kind") is None:
+        return True
+    if parsed.get("basic_size") is None and f.get("basic_size") in (None, ""):
+        # 有类型符号但无数字 → 弱
+        if not any(ch.isdigit() for ch in text):
+            return True
+    return False
+
+
+def _dimension_pass2_angles(
+    bbox: list[Any] | None,
+    ent: dict[str, Any],
+) -> list[float]:
+    """首次 deskew 角 + 可选重试朝向（供 crop.rotate(-ang)；±90 需区分旋向）。"""
+    geom = text_angle_from_bbox(bbox)
+    deskew_on = bool(ent.get("vlm_deskew_reread", True))
+    min_ang = float(ent.get("vlm_deskew_min_angle", 8.0))
+    # bbox 粗估只有 0/90；保留字面角，勿把 -90 归一成 90
+    primary = float(geom) if deskew_on and abs(geom) >= min_ang else 0.0
+    if primary > 90.0:
+        primary = 90.0
+    if primary < -90.0:
+        primary = -90.0
+    angles = [primary]
+
+    if not bool(ent.get("vlm_orientation_retry", True)):
+        return angles
+
+    if abs(primary) >= 60.0:
+        # 对面竖排旋向 + 不旋转
+        candidates = [-primary if abs(primary) > 1e-6 else -90.0, 0.0]
+    elif abs(primary) < 1e-6:
+        candidates = [90.0, -90.0, 45.0, -45.0]
+    else:
+        candidates = [0.0, 90.0, -90.0, -primary]
+
+    max_extra = max(0, int(ent.get("vlm_orientation_retry_max", 2)))
+    for cand in candidates:
+        c = float(cand)
+        if any(abs(c - a) < 5.0 for a in angles):
+            continue
+        angles.append(c)
+        if len(angles) - 1 >= max_extra:
+            break
+    return angles
+
+
+def _parse_dimension_pass2_fields(
+    text2: str,
+    *,
+    bbox: list[Any] | None,
+    read_angle: float,
+) -> tuple[dict[str, Any], str]:
+    parsed = extract_json_payload_safe(text2, default={})
+    if isinstance(parsed, list) and parsed:
+        parsed = parsed[0]
+    fields = parsed.get("fields", parsed) if isinstance(parsed, dict) else {}
+    if not isinstance(fields, dict):
+        fields = {}
+    raw_text = parsed.get("raw_text", "") if isinstance(parsed, dict) else ""
+    text_v = str(fields.get("text") or raw_text or "")
+    fields = enrich_dimension_fields_from_text(fields, text_v, bbox=bbox)
+    # deskew/重试所用朝向即原图文本角估计，优先于模型乱估
+    if abs(float(read_angle)) >= 1e-3:
+        fields["angle"] = normalize_text_angle(read_angle)
+    elif fields.get("angle") in (None, ""):
+        fields["angle"] = text_angle_from_bbox(bbox)
+    raw_text = text_v or raw_text
+    return fields, str(raw_text or "")
+
+
+def _read_dimension_crop_with_orientation(
+    model,
+    processor,
+    crop: Image.Image,
+    ent: dict[str, Any],
+    *,
+    bbox: list[Any] | None,
+    max_tokens: int,
+    notes: list[str] | None = None,
+) -> tuple[dict[str, Any], str]:
+    """对尺寸裁剪做 deskew / 有限朝向重试，取首个非弱结果。"""
+    field_prompt = _dimension_marks_pass2_prompt(ent)
+    angles = _dimension_pass2_angles(bbox, ent)
+    best_fields: dict[str, Any] = {}
+    best_raw = ""
+    for i, ang in enumerate(angles):
+        view = _deskew_crop_for_vlm(crop, ang)
+        text2 = _vlm_generate(model, processor, view, field_prompt, max_tokens)
+        fields, raw_text = _parse_dimension_pass2_fields(text2, bbox=bbox, read_angle=ang)
+        if notes is not None and i > 0:
+            notes.append(f"dimension_orient_retry angle={ang}")
+        if not _dimension_read_looks_weak(fields):
+            fields["vlm_deskew_angle"] = float(ang)
+            return fields, raw_text
+        if i == 0 or (raw_text and not best_raw):
+            best_fields, best_raw = fields, raw_text
+            best_fields["vlm_deskew_angle"] = float(ang)
+    return best_fields, best_raw
 
 
 def _build_plan_prompt(plan: list[dict[str, Any]], *, locate_only: bool = False) -> str:
@@ -282,7 +417,11 @@ def _build_plan_prompt(plan: list[dict[str, Any]], *, locate_only: bool = False)
         if _is_table_entity(ent):
             mode = ent.get("read_mode") or "cell_content"
             table_hint = f"【整表一个框|section={ent.get('section')}|read_mode={mode}】"
-        dim_hint = "【尺寸属性|排除标题栏/图号/材料】" if _is_dimension_marks_entity(ent) else ""
+        dim_hint = (
+            "【尺寸属性|含竖排/倾斜|排除标题栏/图号/材料】"
+            if _is_dimension_marks_entity(ent)
+            else ""
+        )
         if locate_only:
             lines.append(
                 f"- entity_id={ent['entity_id']}, query={ent['locate_query']}"
@@ -661,7 +800,7 @@ def perceive_qwen_vl(
             if _is_table_entity(ent):
                 field_prompt = _table_pass2_prompt(ent)
             elif _is_dimension_marks_entity(ent):
-                field_prompt = _dimension_marks_pass2_prompt(ent)
+                field_prompt = None
             else:
                 field_prompt = (
                     f"读取该局部图像中与「{ent['locate_query']}」相关的字段，只输出 JSON 对象 fields。\n"
@@ -669,22 +808,27 @@ def perceive_qwen_vl(
                     "禁止编造。格式: {\"fields\":{...},\"raw_text\":\"...\"}"
                 )
             try:
-                text2 = _vlm_generate(model, processor, crop, field_prompt, tok)
-                parsed = extract_json_payload_safe(text2, default={})
-                if isinstance(parsed, list) and parsed:
-                    parsed = parsed[0]
-                fields = parsed.get("fields", parsed) if isinstance(parsed, dict) else {}
-                if not isinstance(fields, dict):
-                    fields = {}
-                if _is_table_entity(ent):
-                    fields = _normalize_table_fields(fields, ent)
-                raw_text = parsed.get("raw_text", "") if isinstance(parsed, dict) else ""
                 if _is_dimension_marks_entity(ent):
-                    text_v = str(fields.get("text") or raw_text or "")
-                    fields = enrich_dimension_fields_from_text(
-                        fields, text_v, bbox=box_inst.get("bbox")
+                    fields, raw_text = _read_dimension_crop_with_orientation(
+                        model,
+                        processor,
+                        crop,
+                        ent,
+                        bbox=box_inst.get("bbox"),
+                        max_tokens=tok,
+                        notes=notes,
                     )
-                    raw_text = text_v or raw_text
+                else:
+                    text2 = _vlm_generate(model, processor, crop, field_prompt, tok)
+                    parsed = extract_json_payload_safe(text2, default={})
+                    if isinstance(parsed, list) and parsed:
+                        parsed = parsed[0]
+                    fields = parsed.get("fields", parsed) if isinstance(parsed, dict) else {}
+                    if not isinstance(fields, dict):
+                        fields = {}
+                    if _is_table_entity(ent):
+                        fields = _normalize_table_fields(fields, ent)
+                    raw_text = parsed.get("raw_text", "") if isinstance(parsed, dict) else ""
                 box_inst = {
                     **{k: v for k, v in box_inst.items() if not str(k).startswith("_")},
                     "fields": fields,
