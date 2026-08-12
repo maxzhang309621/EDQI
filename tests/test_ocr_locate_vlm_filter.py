@@ -26,21 +26,26 @@ from pipeline.perceive_qwen_vl import filter_ocr_dimension_candidates_with_vlm
 
 def test_default_backend_is_ocr_locate_vlm_filter():
     cfg = load_config(ROOT / "configs" / "default.yaml")
-    assert dimension_marks_backend(cfg) == "ocr_locate_vlm_filter"
-    assert is_dimension_marks_ocr_locate_vlm(cfg) is True
-    assert is_dimension_marks_vlm(cfg) is False
+    assert dimension_marks_backend(cfg) == "vlm"
+    assert is_dimension_marks_ocr_locate_vlm(cfg) is False
+    assert is_dimension_marks_vlm(cfg) is True
 
 
 def test_hybrid_dims_route_to_ocr_not_vl_locate():
     cfg = load_config(ROOT / "configs" / "default.yaml")
-    plan = merge_perception_plans(
-        collect_entities(load_rules(ROOT / "rules" / "library", only_active=True)),
-        build_drawing_parse_plan(cfg),
+    # 显式 hybrid 仍走 OCR 定位
+    from pipeline.drawing_parse_plan import get_dimension_marks_config, _normalize_dimension_marks_block
+
+    raw = dict(get_dimension_marks_config(cfg))
+    raw["enabled"] = True
+    raw["backend"] = "ocr_locate_vlm_filter"
+    ent = _normalize_dimension_marks_block(raw)
+    assert ent is not None
+    ocr, vl = split_plan_for_backends(
+        [ent, {"entity_id": "main_table", "parse_kind": "table", "fields": []}]
     )
-    ocr, vl = split_plan_for_backends(plan)
     assert any(e.get("parse_kind") == "dimension_marks" for e in ocr)
     assert not any(e.get("parse_kind") == "dimension_marks" for e in vl)
-    assert {e["entity_id"] for e in vl} >= {"material_table", "main_table"}
 
 
 def test_merge_symbol_number_boxes():

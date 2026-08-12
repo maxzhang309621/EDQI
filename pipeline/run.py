@@ -239,8 +239,8 @@ def perceive(
         dim_ocr_vlm = is_dimension_marks_ocr_locate_vlm(config)
         exclude_bbs: list[list[int]] = []
         table_tokens: set[str] = set()
-        # OCR 属性路径（ocr / ocr_locate_vlm_filter）按表格框过滤候选
-        if (not dim_vlm) and bool(dim_cfg.get("exclude_table_regions", True)):
+        # 表格排除区：用于属性清理；重叠 OCR 在纯 VLM 属性模式下不传入（不改重叠行为）
+        if bool(dim_cfg.get("exclude_table_regions", True)):
             page_w = int(meta.get("width") or 0)
             page_h = int(meta.get("height") or 0)
             exclude_pad = float(dim_cfg.get("exclude_table_pad", 2.0))
@@ -253,15 +253,17 @@ def perceive(
                 expand_up_frac=expand_up,
             )
             table_tokens = collect_table_value_tokens(vl_payload.get("instances") or [])
+        ocr_exclude_bbs = None if dim_vlm else (exclude_bbs or None)
+        ocr_exclude_texts = None if dim_vlm else (table_tokens or None)
         ocr_payload = perceive_number_overlap(
             image_path,
             ocr_plan,
             meta,
             config,
             rules=rules,
-            exclude_bboxes=exclude_bbs or None,
+            exclude_bboxes=ocr_exclude_bbs,
             exclude_pad=0.0,
-            exclude_table_texts=table_tokens or None,
+            exclude_table_texts=ocr_exclude_texts,
         )
         ocr_instances = list(ocr_payload.get("instances") or [])
         ocr_notes = list(ocr_payload.get("notes") or [])

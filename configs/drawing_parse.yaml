@@ -15,35 +15,34 @@ tables_only: false
 
 # ---------- 非表格：区域/对象 ----------
 # parse_kind=dimension_marks：尺寸标注属性（Ø/R/长度/° + 基本尺寸/公差）
-# backend（默认 ocr_locate_vlm_filter）:
-#   ocr_locate_vlm_filter — OCR 宽召回(radius/length) → VLM 精筛(重点直径/角度符号)
-#   vlm — VLM 全图定位+字段；ocr — 仅 OCR 规则解析
+# backend（默认 vlm）:
+#   vlm — VLM 全图/分块定位+字段（推荐 8B；重叠仍走独立 OCR keep_pair）
+#   ocr_locate_vlm_filter — OCR 宽召回 → VLM crop 精筛
+#   ocr — 仅 OCR 规则解析
 objects:
   - enabled: true
     entity_id: number_mark
     parse_kind: dimension_marks
-    backend: ocr_locate_vlm_filter
-    locate_query: 图中尺寸数字或数值标注（Ø直径 / R半径 / 长度 / °角度）；排除标题栏/图号/材料牌号
+    backend: vlm
+    locate_query: 图中视图区尺寸数字或数值标注（Ø直径 / R半径 / 长度 / °角度）；严禁表格/标题栏内文字
     cardinality: many
     # false=属性路径不做墨迹重叠配对；规则启用 NUM_TEXT_NO_OVERLAP 时重叠仍走独立 OCR
     detect_overlap: false
-    # OCR 定位/初筛增强（不影响 perception.number_overlap 的重叠检测角度策略）
+    # OCR 定位/初筛增强（仅 ocr / ocr_locate_vlm_filter；不影响 perception.number_overlap）
     ocr_angle_adapt: true
     ocr_angle_adapt_step: 15
     ocr_angle_adapt_min_count: 2
     ocr_angle_adapt_max_extra: 4
     ocr_deskew_reread: true
     ocr_deskew_min_angle: 8
-    # 属性 OCR 专用扫描角（仅尺寸属性路；不改 perception.number_overlap.ocr_angles）
     ocr_angles: [0, 30, 45, 60, 90, -30, -45, -60, -90]
-    # OCR 采信 radius/length；diameter/angle 必须 VLM 认符号后确认
     ocr_accept_kinds: [radius, length]
     vlm_require_kinds: [diameter, angle]
-    # 排除表格区域内的尺寸属性
+    # VLM/最终清理：丢弃落在表格框内的尺寸属性（不改重叠 OCR）
     exclude_table_regions: true
     exclude_table_pad: 2
     exclude_table_expand_up: 0.12
-    # 严格模式：OCR 初筛 + VLM 精筛后只保留配置 fields 中的合法尺寸
+    # 严格模式：只保留配置 fields 中的合法尺寸
     strict_fields_only: true
     require_dim_kind: true
     require_basic_size: true
@@ -53,7 +52,6 @@ objects:
     max_bbox_area_ratio: 0.035
     max_aspect_ratio: 8.0
     vlm_filter_max_candidates: 48
-    # 略放大裁剪，避免 Ø/° 落在框外导致 VLM 看不到符号
     vlm_filter_crop_expand: 0.22
     fields:
       - name: text

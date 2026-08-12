@@ -73,14 +73,14 @@ def test_dimension_marks_in_drawing_parse_plan():
     ent = dims[0]
     assert ent["entity_id"] == "number_mark"
     assert ent.get("detect_overlap") is False
-    assert ent.get("backend") == "ocr_locate_vlm_filter"
+    assert ent.get("backend") == "vlm"
     names = {f["name"] for f in ent["fields"]}
     assert names >= {"text", "angle", "dim_kind", "basic_size", "tolerance", "has_tolerance"}
     ocr, vl = split_plan_for_backends(plan)
-    # 默认：尺寸属性进 OCR（再 VLM 精筛），表格进 VL
-    assert any(e.get("parse_kind") == "dimension_marks" for e in ocr)
-    assert {e["entity_id"] for e in vl} == {"material_table", "main_table"}
-    assert not any(e.get("parse_kind") == "dimension_marks" for e in vl)
+    # 默认：尺寸属性进 VL，表格也进 VL；重叠 number_mark 仍可在规则 OCR
+    assert any(e.get("parse_kind") == "dimension_marks" for e in vl)
+    assert {e["entity_id"] for e in vl} >= {"material_table", "main_table", "number_mark"}
+    assert not any(e.get("parse_kind") == "dimension_marks" for e in ocr)
 
 
 def test_tables_only_default_false():
@@ -97,7 +97,7 @@ def test_tables_only_default_false():
 
 
 def test_tables_only_keeps_dimension_marks_from_drawing_parse():
-    """tables_only 跳过规则库重叠实体；dimension_marks 按 backend 分流（默认进 OCR）。"""
+    """tables_only 跳过规则库重叠实体；dimension_marks 按 backend 分流（默认进 VLM）。"""
     from pipeline.drawing_parse_plan import is_tables_only
 
     cfg = load_config(ROOT / "configs" / "default.yaml")
@@ -105,9 +105,9 @@ def test_tables_only_keeps_dimension_marks_from_drawing_parse():
     assert is_tables_only(cfg) is True
     plan = build_drawing_parse_plan(cfg)
     ocr, vl = split_plan_for_backends(plan)
-    assert any(e.get("parse_kind") == "dimension_marks" for e in ocr)
-    assert {e["entity_id"] for e in vl} == {"material_table", "main_table"}
-    assert not any(e.get("parse_kind") == "dimension_marks" for e in vl)
+    assert not ocr
+    assert any(e.get("parse_kind") == "dimension_marks" for e in vl)
+    assert {e["entity_id"] for e in vl} >= {"material_table", "main_table", "number_mark"}
 
 
 def test_dimension_marks_backend_ocr_routes_to_ocr():

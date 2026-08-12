@@ -126,8 +126,8 @@ def dimension_marks_backend(config: dict[str, Any] | None = None) -> str:
     - vlm：VLM 全图定位 + 字段（OCR 仅保留 keep_pair）
     - ocr_locate_vlm_filter：OCR 宽召回+规则初筛，再用 VLM crop 精筛
     """
-    raw = str(get_dimension_marks_config(config).get("backend") or "ocr_locate_vlm_filter").strip().lower()
-    return _DIM_BACKEND_ALIASES.get(raw, "ocr_locate_vlm_filter")
+    raw = str(get_dimension_marks_config(config).get("backend") or "vlm").strip().lower()
+    return _DIM_BACKEND_ALIASES.get(raw, "vlm")
 
 
 def is_dimension_marks_vlm(config: dict[str, Any] | None = None) -> bool:
@@ -163,8 +163,8 @@ def _normalize_dimension_marks_block(block: dict[str, Any]) -> dict[str, Any] | 
                 {"name": "has_tolerance", "parse_hint": "是否标明公差"},
             ]
         )
-    backend_raw = str(block.get("backend") or "ocr_locate_vlm_filter").strip().lower()
-    backend = _DIM_BACKEND_ALIASES.get(backend_raw, "ocr_locate_vlm_filter")
+    backend_raw = str(block.get("backend") or "vlm").strip().lower()
+    backend = _DIM_BACKEND_ALIASES.get(backend_raw, "vlm")
     return {
         "entity_id": str(block.get("entity_id") or "number_mark"),
         "locate_query": str(
@@ -333,7 +333,7 @@ def split_plan_for_backends(
     vl: list[dict[str, Any]] = []
     for ent in plan:
         parse_kind = str(ent.get("parse_kind") or "").lower()
-        backend = str(ent.get("backend") or "ocr_locate_vlm_filter").strip().lower()
+        backend = str(ent.get("backend") or "vlm").strip().lower()
         backend = _DIM_BACKEND_ALIASES.get(backend, backend)
         if parse_kind == "dimension_marks":
             if backend == "vlm":
