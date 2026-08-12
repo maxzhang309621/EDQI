@@ -239,8 +239,8 @@ def perceive(
         dim_ocr_vlm = is_dimension_marks_ocr_locate_vlm(config)
         exclude_bbs: list[list[int]] = []
         table_tokens: set[str] = set()
-        # 表格排除区：用于属性清理；重叠 OCR 在纯 VLM 属性模式下不传入（不改重叠行为）
-        if bool(dim_cfg.get("exclude_table_regions", True)):
+        # 与 main 一致：仅 OCR 属性路径按表格框过滤；VLM 属性时重叠 OCR 独立，不做表格剔除
+        if (not dim_vlm) and bool(dim_cfg.get("exclude_table_regions", True)):
             page_w = int(meta.get("width") or 0)
             page_h = int(meta.get("height") or 0)
             exclude_pad = float(dim_cfg.get("exclude_table_pad", 2.0))
@@ -253,26 +253,39 @@ def perceive(
                 expand_up_frac=expand_up,
             )
             table_tokens = collect_table_value_tokens(vl_payload.get("instances") or [])
-        ocr_exclude_bbs = None if dim_vlm else (exclude_bbs or None)
-        ocr_exclude_texts = None if dim_vlm else (table_tokens or None)
         ocr_payload = perceive_number_overlap(
             image_path,
             ocr_plan,
             meta,
             config,
             rules=rules,
-            exclude_bboxes=ocr_exclude_bbs,
+            exclude_bboxes=exclude_bbs or None,
             exclude_pad=0.0,
-            exclude_table_texts=ocr_exclude_texts,
+            exclude_table_texts=table_tokens or None,
         )
         ocr_instances = list(ocr_payload.get("instances") or [])
         ocr_notes = list(ocr_payload.get("notes") or [])
         if dim_vlm:
-            # 属性已由 VLM 全图定位：重叠 OCR 只保留 keep_pair 证据
+            # 与 main 一致：属性已由 VLM 负责；重叠 OCR 只保留 keep_pair，不做 sanitize
             before = len(ocr_instances)
             ocr_instances = [i for i in ocr_instances if i.get("keep_pair")]
             ocr_notes.append(f"ocr_keep_pair_only={len(ocr_instances)}/{before}")
-        elif dim_ocr_vlm:
+            ocr_payload = {**ocr_payload, "instances": ocr_instances, "notes": ocr_notes}
+            merged = _merge_instance_payloads(
+                vl_payload,
+                ocr_payload,
+                backend=f"{vl_payload.get('backend', 'qwen_vl')}+number_overlap",
+            )
+            if isinstance(vl_payload.get("timing"), dict):
+                merged["timing"] = vl_payload["timing"]
+            merged["notes"] = list(merged.get("notes") or []) + [
+                "dual_backend=vl+number_overlap",
+                f"vl_entities={[e.get('entity_id') for e in vl_plan]}",
+                f"ocr_entities={[e.get('entity_id') for e in ocr_plan]}",
+                f"dimension_marks_backend={dim_backend}",
+            ]
+            return merged
+        if dim_ocr_vlm:
             # OCR 宽召回+规则初筛 → VLM crop 精筛；keep_pair 原样保留
             page_w = int(meta.get("width") or 0)
             page_h = int(meta.get("height") or 0)
@@ -321,48 +334,67 @@ def perceive(
                 notes=ocr_notes,
             )
             ocr_instances = accepted + keep_pairs
+            ocr_payload = {**ocr_payload, "instances": ocr_instances, "notes": ocr_notes}
+            merged = _merge_instance_payloads(
+                vl_payload,
+                ocr_payload,
+                backend=f"{vl_payload.get('backend', 'qwen_vl')}+number_overlap",
+            )
+            page_w = int(meta.get("width") or 0)
+            page_h = int(meta.get("height") or 0)
+            if not exclude_bbs and bool(dim_cfg.get("exclude_table_regions", True)):
+                exclude_bbs = build_table_exclude_regions(
+                    merged.get("instances") or [],
+                    page_w=page_w,
+                    page_h=page_h,
+                    pad=float(dim_cfg.get("exclude_table_pad", 2.0)),
+                    expand_up_frac=float(dim_cfg.get("exclude_table_expand_up", 0.12)),
+                )
+                if not table_tokens:
+                    table_tokens = collect_table_value_tokens(merged.get("instances") or [])
+            allowed_names = [
+                str(f.get("name"))
+                for f in (dim_cfg.get("fields") or [])
+                if isinstance(f, dict) and f.get("name")
+            ]
+            cleaned, n_drop = sanitize_number_mark_instances(
+                list(merged.get("instances") or []),
+                page_w=page_w,
+                page_h=page_h,
+                allowed_field_names=allowed_names or None,
+                require_dim_kind=bool(dim_cfg.get("require_dim_kind", True)),
+                require_basic_size=bool(dim_cfg.get("require_basic_size", True)),
+                max_bbox_width_ratio=float(dim_cfg.get("max_bbox_width_ratio", 0.22)),
+                max_aspect_ratio=float(dim_cfg.get("max_aspect_ratio", 8.0)),
+                max_height_ratio=float(dim_cfg.get("max_bbox_height_ratio", 0.12)),
+                max_area_ratio=float(dim_cfg.get("max_bbox_area_ratio", 0.035)),
+                exclude_bboxes=exclude_bbs or None,
+                exclude_pad=float(dim_cfg.get("exclude_table_pad", 2.0)),
+                exclude_table_texts=table_tokens or None,
+                require_vlm_for_kinds=set(dim_cfg.get("vlm_require_kinds") or ["diameter", "angle"]),
+            )
+            cleaned, n_dedupe = dedupe_dimension_attribute_instances(cleaned)
+            merged["instances"] = cleaned
+            if isinstance(vl_payload.get("timing"), dict):
+                merged["timing"] = vl_payload["timing"]
+            merged["notes"] = list(merged.get("notes") or []) + [
+                "dual_backend=vl+number_overlap",
+                f"vl_entities={[e.get('entity_id') for e in vl_plan]}",
+                f"ocr_entities={[e.get('entity_id') for e in ocr_plan]}",
+                f"dimension_marks_backend={dim_backend}",
+                f"table_exclude_boxes={len(exclude_bbs)}",
+                f"table_value_tokens={len(table_tokens)}",
+                f"number_mark_sanitized_dropped={n_drop}",
+                f"dimension_attr_deduped={n_dedupe}",
+            ]
+            return merged
+        # backend=ocr：合并后不做严格 sanitize（与 main OCR 属性行为接近）
         ocr_payload = {**ocr_payload, "instances": ocr_instances, "notes": ocr_notes}
         merged = _merge_instance_payloads(
             vl_payload,
             ocr_payload,
             backend=f"{vl_payload.get('backend', 'qwen_vl')}+number_overlap",
         )
-        # 最终清理：大范围假框 / 非声明属性 / 表格区内 number_mark
-        page_w = int(meta.get("width") or 0)
-        page_h = int(meta.get("height") or 0)
-        if not exclude_bbs and bool(dim_cfg.get("exclude_table_regions", True)):
-            exclude_bbs = build_table_exclude_regions(
-                merged.get("instances") or [],
-                page_w=page_w,
-                page_h=page_h,
-                pad=float(dim_cfg.get("exclude_table_pad", 2.0)),
-                expand_up_frac=float(dim_cfg.get("exclude_table_expand_up", 0.12)),
-            )
-            if not table_tokens:
-                table_tokens = collect_table_value_tokens(merged.get("instances") or [])
-        allowed_names = [
-            str(f.get("name"))
-            for f in (dim_cfg.get("fields") or [])
-            if isinstance(f, dict) and f.get("name")
-        ]
-        cleaned, n_drop = sanitize_number_mark_instances(
-            list(merged.get("instances") or []),
-            page_w=page_w,
-            page_h=page_h,
-            allowed_field_names=allowed_names or None,
-            require_dim_kind=bool(dim_cfg.get("require_dim_kind", True)),
-            require_basic_size=bool(dim_cfg.get("require_basic_size", True)),
-            max_bbox_width_ratio=float(dim_cfg.get("max_bbox_width_ratio", 0.22)),
-            max_aspect_ratio=float(dim_cfg.get("max_aspect_ratio", 8.0)),
-            max_height_ratio=float(dim_cfg.get("max_bbox_height_ratio", 0.12)),
-            max_area_ratio=float(dim_cfg.get("max_bbox_area_ratio", 0.035)),
-            exclude_bboxes=exclude_bbs or None,
-            exclude_pad=float(dim_cfg.get("exclude_table_pad", 2.0)),
-            exclude_table_texts=table_tokens or None,
-            require_vlm_for_kinds=set(dim_cfg.get("vlm_require_kinds") or ["diameter", "angle"]),
-        )
-        cleaned, n_dedupe = dedupe_dimension_attribute_instances(cleaned)
-        merged["instances"] = cleaned
         if isinstance(vl_payload.get("timing"), dict):
             merged["timing"] = vl_payload["timing"]
         merged["notes"] = list(merged.get("notes") or []) + [
@@ -370,10 +402,6 @@ def perceive(
             f"vl_entities={[e.get('entity_id') for e in vl_plan]}",
             f"ocr_entities={[e.get('entity_id') for e in ocr_plan]}",
             f"dimension_marks_backend={dim_backend}",
-            f"table_exclude_boxes={len(exclude_bbs)}",
-            f"table_value_tokens={len(table_tokens)}",
-            f"number_mark_sanitized_dropped={n_drop}",
-            f"dimension_attr_deduped={n_dedupe}",
         ]
         return merged
 

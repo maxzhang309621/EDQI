@@ -49,17 +49,12 @@ def test_reject_wide_bbox():
     assert not bbox_geometry_ok([0, 1024, 1280, 1169], page_w=2048, page_h=1448)
 
 
-def test_finalize_drops_invalid():
+def test_finalize_enriches_without_dropping():
+    """与 main 对齐：finalize 只补字段，不因严格规则丢弃候选。"""
     plan = [
         {
             "entity_id": "number_mark",
             "parse_kind": "dimension_marks",
-            "strict_fields_only": True,
-            "require_dim_kind": True,
-            "require_basic_size": True,
-            "exclude_table_regions": True,
-            "max_bbox_width_ratio": 0.28,
-            "max_aspect_ratio": 8.0,
             "fields": [
                 {"name": "text"},
                 {"name": "dim_kind"},
@@ -73,20 +68,14 @@ def test_finalize_drops_invalid():
         {
             "entity_id": "number_mark",
             "bbox": [100, 100, 140, 130],
-            "fields": {"text": "R5", "dim_kind": "radius", "basic_size": "5", "extra": 1},
+            "fields": {"text": "R5"},
             "raw_text": "R5",
         },
         {
             "entity_id": "number_mark",
             "bbox": [1024, 200, 2048, 240],
-            "fields": {"text": "11±0.1", "dim_kind": "length", "basic_size": "11"},
+            "fields": {"text": "11±0.1"},
             "raw_text": "11±0.1",
-        },
-        {
-            "entity_id": "number_mark",
-            "bbox": [50, 50, 80, 70],
-            "fields": {"text": "noise", "dim_kind": None},
-            "raw_text": "noise",
         },
         {
             "entity_id": "main_table",
@@ -94,11 +83,10 @@ def test_finalize_drops_invalid():
             "fields": {"page": "1/1"},
         },
     ]
-    notes: list[str] = []
-    out = _finalize_dimension_instances(instances, plan, page_w=2048, page_h=1448, notes=notes)
+    out = _finalize_dimension_instances(instances, plan, page_w=2048, page_h=1448)
     eids = [i["entity_id"] for i in out]
-    assert eids.count("number_mark") == 1
+    assert eids.count("number_mark") == 2
     assert "main_table" in eids
-    mark = next(i for i in out if i["entity_id"] == "number_mark")
-    assert "extra" not in (mark.get("fields") or {})
-    assert any(n.startswith("dimension_strict_dropped=") for n in notes)
+    mark = next(i for i in out if (i.get("fields") or {}).get("text") == "R5")
+    assert mark["fields"].get("dim_kind") == "radius"
+    assert mark["fields"].get("basic_size") == "5"

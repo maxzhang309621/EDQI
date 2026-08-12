@@ -198,10 +198,10 @@ def _normalize_dimension_marks_block(block: dict[str, Any]) -> dict[str, Any] | 
         "exclude_table_regions": bool(block.get("exclude_table_regions", True)),
         "exclude_table_pad": float(block.get("exclude_table_pad", 2.0)),
         "exclude_table_expand_up": float(block.get("exclude_table_expand_up", 0.12)),
-        # 严格模式：只保留配置字段 + 合法尺寸；过滤畸形框/杂讯
-        "strict_fields_only": bool(block.get("strict_fields_only", True)),
-        "require_dim_kind": bool(block.get("require_dim_kind", True)),
-        "require_basic_size": bool(block.get("require_basic_size", True)),
+        # 严格模式（默认关，与 main 对齐；ocr_locate_vlm_filter 可显式打开）
+        "strict_fields_only": bool(block.get("strict_fields_only", False)),
+        "require_dim_kind": bool(block.get("require_dim_kind", False)),
+        "require_basic_size": bool(block.get("require_basic_size", False)),
         "max_bbox_width_ratio": float(block.get("max_bbox_width_ratio", 0.22)),
         "max_bbox_height_ratio": float(block.get("max_bbox_height_ratio", 0.12)),
         "max_bbox_area_ratio": float(block.get("max_bbox_area_ratio", 0.035)),

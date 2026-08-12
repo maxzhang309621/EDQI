@@ -223,37 +223,26 @@ def _coerce_instance_list(
 
 def _dimension_marks_locate_rules() -> list[str]:
     return [
-        "对于尺寸标注（parse_kind=dimension_marks / number_mark）—严格模式：",
-        "只定位视图区中的尺寸数字与公差标注（含 Ø/⌀/Φ 直径、R 半径、长度数值、角度°、±公差）。",
-        "bbox 必须紧贴该尺寸文字，禁止拉成横贯半页/整页的细长条。",
-        "严禁定位表格框内任何文字：material_table、main_table、标题栏/参数表/BOM 单元格内的数字与代号一律不要输出为 number_mark。",
-        "禁止定位：标题栏/图框表格、图号、材料牌号、Siemens/版权、比例、页码、"
-        "零件名、粗糙度代号旁非尺寸串、坐标刻度、网格线、任何非尺寸文本。",
-        "拿不准是否为尺寸标注时宁可漏检，不要输出。",
+        "对于尺寸标注（parse_kind=dimension_marks / number_mark）：",
+        "只定位视图中的尺寸数字与公差标注（含 Ø/⌀/Φ 直径、R 半径、长度、角度°、±公差）。",
+        "禁止定位：标题栏/图框表格文字、图号、材料牌号、BOM、Siemens/版权、比例、页码、"
+        "零件名、表面粗糙度符号旁的非尺寸长串、坐标轴刻度。",
         "每个独立尺寸标注各一个 bbox；重叠/压盖的尺寸也要分开框。",
     ]
 
 
 def _dimension_marks_pass2_prompt(ent: dict[str, Any]) -> str:
-    allowed = [str(f.get("name")) for f in (ent.get("fields") or []) if f.get("name")]
     field_desc = json_fields(ent)
-    allow_s = ", ".join(allowed) if allowed else "text, dim_kind, basic_size, tolerance, has_tolerance, angle"
     return (
-        "严格判定该局部图是否为工程视图中的尺寸标注。只输出 JSON。\n"
-        f"fields 只允许这些键（不得增删）: {allow_s}\n"
-        "若不是尺寸标注，全部字段填 null，raw_text=\"\"（宁缺毋滥）。\n"
-        f"字段说明: {field_desc}\n"
+        "读取该局部图中的工程尺寸标注属性。只输出 JSON。\n"
+        "若裁剪区不是尺寸标注（图号/材料/标题栏等），fields 全部填 null。\n"
+        f"字段: {field_desc}\n"
         "规则:\n"
-        "- 优先检查数字旁是否有 Ø/⌀/Φ（直径）或 °（角度）；有则 dim_kind=diameter|angle，"
-        "并在 text 中写出符号（如 Ø10、45°）；\n"
-        "- R/r 后直接跟数字 → radius；普通长度数值/±公差 → length；\n"
-        "- 若裁剪内容明显是表格/标题栏单元格（标签旁的表值、图号、材料等），全部填 null；\n"
-        "- 一律拒绝：Max./MIN/TYP/REF、粗糙度(Rz/Ra)、视图字母、气泡号、图号、表值、残片；\n"
-        "- dim_kind 只能是 diameter|radius|length|angle，否则 null；\n"
-        "- basic_size=基本尺寸；tolerance=公差（无则 null）；has_tolerance 为布尔；\n"
-        "- angle=文本相对水平线朝向角（度，竖排≈±90）；\n"
-        "- 禁止输出未声明字段，禁止编造，禁止把非尺寸硬套成 length。\n"
-        "格式: {\"fields\":{...},\"raw_text\":\"...\"}"
+        "- text=可见原文；dim_kind=diameter|radius|length|angle|null；\n"
+        "- basic_size=基本尺寸（±前）；tolerance=公差（±后，无则 null）；\n"
+        "- has_tolerance=是否标明公差（布尔）；\n"
+        "- angle=文本相对水平线朝向角（度，水平≈0，竖排≈90 或 -90）。\n"
+        "禁止编造。格式: {\"fields\":{...},\"raw_text\":\"...\"}"
     )
 
 
@@ -454,90 +443,30 @@ def _finalize_dimension_instances(
     page_h: int,
     notes: list[str] | None = None,
 ) -> list[dict[str, Any]]:
-    """严格按 drawing_parse 配置过滤尺寸属性；非尺寸/畸形框/表格内丢弃。"""
-    from pipeline.perceive_common import build_table_exclude_regions
-
+    """与 main 对齐：仅补齐尺寸字段，不做严格丢弃（召回优先）。"""
     dim_ents = {e["entity_id"]: e for e in plan if _is_dimension_marks_entity(e)}
     if not dim_ents:
         return instances
 
-    kept: list[dict[str, Any]] = []
-    dropped = 0
+    out: list[dict[str, Any]] = []
     for inst in instances:
         if not isinstance(inst, dict):
             continue
         eid = inst.get("entity_id")
-        ent = dim_ents.get(eid)
-        if not ent:
-            kept.append(inst)
+        if eid not in dim_ents:
+            out.append(inst)
             continue
-        flags = _dimension_ent_strict_flags(ent)
-        allowed = [str(f.get("name")) for f in (ent.get("fields") or []) if f.get("name")]
         fields = dict(inst.get("fields") or {})
         text_v = str(fields.get("text") or inst.get("raw_text") or "")
         fields = enrich_dimension_fields_from_text(fields, text_v, bbox=inst.get("bbox"))
-        if flags["strict"]:
-            fields = clip_fields_to_schema(fields, allowed)
-        # 全图/分块 VLM 定位的尺寸视为已确认（避免 sanitize 按 vlm_require 误杀）
-        fields["vlm_filtered"] = True
         inst = dict(inst)
         inst["fields"] = fields
         if fields.get("text"):
             inst["raw_text"] = fields.get("text")
         if fields.get("angle") is not None:
             inst["angle"] = fields.get("angle")
-
-        if not bbox_geometry_ok(
-            inst.get("bbox"),
-            page_w=page_w,
-            page_h=page_h,
-            max_width_ratio=flags["max_bbox_width_ratio"],
-            max_aspect_ratio=flags["max_aspect_ratio"],
-            max_height_ratio=flags["max_bbox_height_ratio"],
-            max_area_ratio=flags["max_bbox_area_ratio"],
-        ):
-            dropped += 1
-            continue
-        if not is_valid_dimension_mark(
-            fields,
-            text=text_v,
-            require_dim_kind=flags["require_dim_kind"],
-            require_basic_size=flags["require_basic_size"],
-        ):
-            dropped += 1
-            continue
-        kept.append(inst)
-
-    if any(_dimension_ent_strict_flags(e)["exclude_table_regions"] for e in dim_ents.values()):
-        pad = max(
-            (float(e.get("exclude_table_pad", 2.0)) for e in dim_ents.values()),
-            default=2.0,
-        )
-        expand_up = max(
-            (float(e.get("exclude_table_expand_up", 0.12)) for e in dim_ents.values()),
-            default=0.12,
-        )
-        table_regions = build_table_exclude_regions(
-            instances,
-            page_w=page_w,
-            page_h=page_h,
-            pad=pad,
-            expand_up_frac=expand_up,
-        )
-        if table_regions:
-            dim_only = [i for i in kept if i.get("entity_id") in dim_ents]
-            other = [i for i in kept if i.get("entity_id") not in dim_ents]
-            filtered, n_tab = filter_instances_outside_bboxes(
-                dim_only, table_regions, pad=0.0, entity_ids=None
-            )
-            dropped += n_tab
-            kept = other + filtered
-            if notes is not None:
-                notes.append(f"dimension_exclude_table_regions={n_tab}")
-
-    if notes is not None:
-        notes.append(f"dimension_strict_dropped={dropped}")
-    return kept
+        out.append(inst)
+    return out
 
 
 def _build_plan_prompt(plan: list[dict[str, Any]], *, locate_only: bool = False) -> str:
