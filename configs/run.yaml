@@ -30,7 +30,7 @@ enqueue_review: true
 drawing_parse: true
 
 # 仅表格 VLM（不合并数字重叠 OCR）；null 表示不覆盖 default/drawing_parse 中的 tables_only
-tables_only: false
+tables_only: null
 
 # 主工程配置（模型、路径、感知等）
 config: configs/default.yaml
