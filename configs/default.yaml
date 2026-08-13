@@ -20,13 +20,23 @@ perception:
   # 部件分区：先定位部件再识别尺寸属性（失败回退网格）
   view_regions:
     enabled: true
-    expand_ratio: 0.2
+    # 略增大外扩，覆盖部件周围尺寸（旧网格是整页覆盖）
+    expand_ratio: 0.28
     min_side: 64
     max_area_frac: 0.35
     fallback_grid: true
     locate_max_new_tokens: 512
+    # Pass0 粗框后按墨迹收紧到零件轮廓（原始框贴边）
+    tighten_to_ink: true
+    ink_threshold: 245
+    tighten_pad: 2
+    # 部件区内再按 tile_size 切分（对齐架构前 ≤1280 窗口）
     tile_size: 1280
     tile_overlap: 0.2
+    # 部件区未覆盖处补扫网格，避免漏掉视图间隙尺寸
+    fill_uncovered_grid: true
+    # 默认关闭：半页融框过滤曾误删有效尺寸；改由 prefer_smaller NMS 处理
+    drop_oversized_dims: false
   # 调试阶段关闭：数字重叠 OCR 自动切换 / 双后端合并
   auto_number_overlap_backend: false
   number_overlap:

@@ -52,6 +52,16 @@ python -m pipeline.review_queue resolve work_dirs/review_queue/xxx.json --decisi
 
 感知缓存与大图分块默认开启，配置见 `configs/default.yaml` 的 `perception:` 段。
 
+**清空感知缓存（改提示词 / 部件分区后务必执行）**：
+
+```bash
+# Linux / macOS
+rm -rf work_dirs/cache/perception work_dirs/cache/tiles
+
+# 仅确认目录存在时再删（更稳妥）
+rm -rf work_dirs/cache/perception/* work_dirs/cache/tiles/*
+```
+
 **常驻推理（推荐，避免每次重载 VLM）**：
 
 ```bash

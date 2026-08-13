@@ -22,6 +22,22 @@ def test_expand_view_bbox():
     assert out[2] > 200 and out[3] > 200
 
 
+def test_tighten_bbox_to_ink():
+    from PIL import Image, ImageDraw
+
+    from pipeline.view_regions import tighten_bbox_to_ink
+
+    img = Image.new("RGB", (200, 200), (255, 255, 255))
+    draw = ImageDraw.Draw(img)
+    draw.rectangle([80, 80, 120, 120], outline=(0, 0, 0), width=2)
+    loose = [40, 40, 160, 160]
+    tight = tighten_bbox_to_ink(img, loose, ink_threshold=245, pad=2)
+    assert tight[0] >= loose[0] and tight[1] >= loose[1]
+    assert tight[2] <= loose[2] and tight[3] <= loose[3]
+    assert tight[0] <= 82 and tight[1] <= 82
+    assert tight[2] >= 118 and tight[3] >= 118
+
+
 def test_shrink_drops_center_in_table():
     region = [1100, 1100, 1300, 1200]
     tables = [[1000, 1050, 2000, 1400]]
@@ -98,21 +114,51 @@ def test_empty_views_fallback_grid():
     assert len(specs[0]["regions"]) >= 2
 
 
-def test_drop_oversized_and_reindex_preserves_component_parent():
-    from pipeline.perceive_utils import _drop_oversized_dimension_boxes, reindex_instances
+def test_build_view_regions_splits_by_tile_side():
+    # 面积未超 max_area_frac，但边长 > tile_size → 仍应再切
+    page_w, page_h = 3000, 3000
+    regions = build_view_regions(
+        [[100, 100, 2000, 900]],
+        page_w=page_w,
+        page_h=page_h,
+        table_bboxes=None,
+        expand_ratio=0.0,
+        min_side=32,
+        max_area_frac=0.9,
+        tile_size=1280,
+        tile_overlap=0.2,
+    )
+    assert len(regions) >= 2
 
-    insts = [
-        {"entity_id": "number_mark", "bbox": [10, 10, 50, 40], "confidence": 0.9, "parent_id": "component#0"},
-        {"entity_id": "number_mark", "bbox": [0, 0, 2000, 1000], "confidence": 0.99, "parent_id": "component#0"},
+
+def test_uncovered_grid_regions_skips_covered():
+    from pipeline.view_regions import uncovered_grid_regions
+
+    covered = [[0, 0, 2000, 1500]]
+    extra = uncovered_grid_regions(
+        covered,
+        page_w=2000,
+        page_h=1500,
+        tile_size=1280,
+        min_cover_frac=0.55,
+    )
+    assert extra == []
+
+
+def test_assign_parent_by_components():
+    from pipeline.view_regions import assign_parent_by_components
+
+    comps = [
         {
-            "entity_id": "component",
             "instance_id": "component#0",
             "bbox": [100, 100, 400, 400],
-            "label": "front",
-        },
+            "bbox_expanded": [50, 50, 450, 450],
+        }
     ]
-    kept = _drop_oversized_dimension_boxes(insts[:2], page_w=2000, page_h=1500, max_area_frac=0.35)
-    assert len(kept) == 1
-    out = reindex_instances(kept + [insts[2]])
+    insts = [
+        {"entity_id": "number_mark", "bbox": [200, 200, 220, 230]},
+        {"entity_id": "number_mark", "bbox": [900, 900, 920, 930], "parent_id": "component#9"},
+    ]
+    out = assign_parent_by_components(insts, comps)
     assert out[0]["parent_id"] == "component#0"
-    assert out[1]["instance_id"] == "component#0"
+    assert out[1]["parent_id"] == "component#9"

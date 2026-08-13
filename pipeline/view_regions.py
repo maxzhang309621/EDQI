@@ -37,6 +37,46 @@ def expand_view_bbox(
     return _clamp_bbox([x1 - dx, y1 - dy, x2 + dx, y2 + dy], page_w, page_h)
 
 
+def tighten_bbox_to_ink(
+    image: Any,
+    bbox: list[int],
+    *,
+    ink_threshold: int = 245,
+    pad: int = 2,
+    min_ink_pixels: int = 40,
+    max_shrink_frac: float = 0.85,
+) -> list[int]:
+    """在 VLM 粗框内按墨迹收紧到零件几何外接矩形（贴边）。
+
+    若墨迹过少或收紧幅度异常，返回原框。
+    """
+    import numpy as np
+
+    page_w, page_h = image.size
+    x1, y1, x2, y2 = _clamp_bbox(list(bbox), page_w, page_h)
+    if x2 - x1 < 8 or y2 - y1 < 8:
+        return [x1, y1, x2, y2]
+    crop = image.crop((x1, y1, x2, y2)).convert("L")
+    arr = np.asarray(crop, dtype=np.uint8)
+    ink = arr < int(ink_threshold)
+    if int(ink.sum()) < int(min_ink_pixels):
+        return [x1, y1, x2, y2]
+    ys, xs = np.where(ink)
+    if len(xs) == 0:
+        return [x1, y1, x2, y2]
+    tx1 = x1 + int(xs.min()) - int(pad)
+    ty1 = y1 + int(ys.min()) - int(pad)
+    tx2 = x1 + int(xs.max()) + 1 + int(pad)
+    ty2 = y1 + int(ys.max()) + 1 + int(pad)
+    tight = _clamp_bbox([tx1, ty1, tx2, ty2], page_w, page_h)
+    # 防止噪声导致过度塌缩（面积缩到原框 <15% 则放弃）
+    if _area(tight) < (1.0 - float(max_shrink_frac)) * _area([x1, y1, x2, y2]):
+        return [x1, y1, x2, y2]
+    if tight[2] - tight[0] < 8 or tight[3] - tight[1] < 8:
+        return [x1, y1, x2, y2]
+    return tight
+
+
 def _overlap_xyxy(a: list[int], b: list[int]) -> bool:
     return not (a[2] <= b[0] or b[2] <= a[0] or a[3] <= b[1] or b[3] <= a[1])
 
@@ -129,7 +169,7 @@ def build_view_regions(
     tile_size: int = 1280,
     tile_overlap: float = 0.2,
 ) -> list[list[int]]:
-    """视图框 → 尺寸识别区列表（已外扩、扣表、过滤/拆分过大）。"""
+    """视图框 → 尺寸识别区列表（已外扩、扣表；过大/超边长则按 tile 再切，对齐旧网格窗口）。"""
     regions: list[list[int]] = []
     for vb in view_bboxes or []:
         if not vb or len(vb) != 4:
@@ -141,19 +181,104 @@ def build_view_regions(
         shrunk = _clamp_bbox(shrunk, page_w, page_h)
         if is_region_too_small(shrunk, min_side=min_side):
             continue
-        if is_region_too_large(shrunk, page_w, page_h, max_area_frac=max_area_frac):
-            parts = split_large_region(shrunk, tile_size=tile_size, overlap=tile_overlap)
-            for p in parts:
-                p = _clamp_bbox(p, page_w, page_h)
-                if is_region_too_small(p, min_side=min_side):
-                    continue
-                p2 = shrink_region_away_from_tables(p, table_bboxes)
-                if p2 is None or is_region_too_small(p2, min_side=min_side):
-                    continue
-                regions.append(_clamp_bbox(p2, page_w, page_h))
-            continue
-        regions.append(shrunk)
+        # 与架构前 make_tiles 对齐：边长或面积过大都再切，避免「整块松散大 crop」导致 Pass1 漏尺寸
+        need_split = is_region_too_large(
+            shrunk, page_w, page_h, max_area_frac=max_area_frac
+        ) or max(shrunk[2] - shrunk[0], shrunk[3] - shrunk[1]) > int(tile_size)
+        parts = (
+            split_large_region(shrunk, tile_size=tile_size, overlap=tile_overlap)
+            if need_split
+            else [shrunk]
+        )
+        for p in parts:
+            p = _clamp_bbox(p, page_w, page_h)
+            if is_region_too_small(p, min_side=min_side):
+                continue
+            p2 = shrink_region_away_from_tables(p, table_bboxes)
+            if p2 is None or is_region_too_small(p2, min_side=min_side):
+                continue
+            regions.append(_clamp_bbox(p2, page_w, page_h))
     return regions
+
+
+def uncovered_grid_regions(
+    covered: list[list[int]] | None,
+    *,
+    page_w: int,
+    page_h: int,
+    table_bboxes: list[list[int]] | None = None,
+    tile_size: int = 1280,
+    tile_overlap: float = 0.2,
+    min_cover_frac: float = 0.55,
+) -> list[list[int]]:
+    """整页网格中与已有部件区覆盖不足的 tile，用于补回部件外尺寸（对齐旧全图分块覆盖）。"""
+    from pipeline.perceive_utils import make_tiles
+
+    if max(page_w, page_h) <= tile_size:
+        grid = [[0, 0, page_w, page_h]]
+    else:
+        grid = [list(t) for t in make_tiles(page_w, page_h, tile_size=tile_size, overlap=tile_overlap)]
+    covered = [c for c in (covered or []) if c and len(c) == 4]
+    out: list[list[int]] = []
+    for tile in grid:
+        tx1, ty1, tx2, ty2 = tile
+        tarea = max(1.0, _area(tile))
+        cover = 0.0
+        for c in covered:
+            ix1 = max(tx1, c[0])
+            iy1 = max(ty1, c[1])
+            ix2 = min(tx2, c[2])
+            iy2 = min(ty2, c[3])
+            if ix2 > ix1 and iy2 > iy1:
+                cover += float((ix2 - ix1) * (iy2 - iy1))
+        if cover / tarea >= float(min_cover_frac):
+            continue
+        shrunk = shrink_region_away_from_tables(tile, table_bboxes)
+        if shrunk is None:
+            continue
+        shrunk = _clamp_bbox(shrunk, page_w, page_h)
+        if is_region_too_small(shrunk, min_side=32):
+            continue
+        out.append(shrunk)
+    return out
+
+
+def assign_parent_by_components(
+    instances: list[dict[str, Any]],
+    components: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """将尚无 parent_id 的尺寸框，按中心落入的部件扩展框关联。"""
+    comps = [c for c in components or [] if c.get("bbox") or c.get("bbox_expanded")]
+    if not comps:
+        return instances
+    out: list[dict[str, Any]] = []
+    for inst in instances or []:
+        item = dict(inst)
+        if item.get("parent_id"):
+            out.append(item)
+            continue
+        bbox = item.get("bbox") or []
+        if len(bbox) != 4:
+            out.append(item)
+            continue
+        cx = (float(bbox[0]) + float(bbox[2])) / 2.0
+        cy = (float(bbox[1]) + float(bbox[3])) / 2.0
+        best_id = None
+        best_area = None
+        for c in comps:
+            box = c.get("bbox_expanded") or c.get("bbox")
+            if not box or len(box) != 4:
+                continue
+            x1, y1, x2, y2 = [float(v) for v in box]
+            if x1 <= cx <= x2 and y1 <= cy <= y2:
+                a = (x2 - x1) * (y2 - y1)
+                if best_area is None or a < best_area:
+                    best_area = a
+                    best_id = c.get("instance_id") or c.get("part_id")
+        if best_id:
+            item["parent_id"] = best_id
+        out.append(item)
+    return out
 
 
 def build_part_region_specs(

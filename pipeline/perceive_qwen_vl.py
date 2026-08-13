@@ -804,8 +804,10 @@ def _normalize_instances(
 _VIEW_LOCATE_PROMPT = (
     "你是工程图纸视图定位模块。请标出图中每个零件几何视图的外接框"
     "（主视、侧视、剖视、DETAIL 局部放大、单独摆放的零件视图等）。\n"
+    "bbox 必须紧贴零件几何轮廓外缘：上下左右贴着可见轮廓线，"
+    "不要为尺寸标注、公差、指引线、空白留白留边距。\n"
     "禁止框选：标题栏、物料表、图框表格、General data/总注文字块、单独的尺寸数字与公差。\n"
-    "每个独立视图一个紧致 bbox，不要把多个视图合成一个大框，不要覆盖半页空白。\n"
+    "每个独立视图一个紧致 bbox；禁止把多个视图合成一个大框；禁止覆盖大片空白。\n"
     "为每个视图给出短 label（如 front / side / top / section / DETAIL_M / iso）。\n"
     "只输出一个简短 JSON 数组，不要 markdown，不要解释。\n"
     '每个元素格式: {"bbox_2d":[x1,y1,x2,y2],"label":"front"}\n'
@@ -823,8 +825,11 @@ def locate_drawing_views(
 
     返回 (views, notes)，views 元素为 {"bbox":[x1,y1,x2,y2], "label": str}。
     """
+    from pipeline.view_regions import tighten_bbox_to_ink
+
     cfg = config or load_config()
     model_cfg = cfg.get("models", {}).get("qwen3_vl", {})
+    vr_cfg = (cfg.get("perception") or {}).get("view_regions") or {}
     notes: list[str] = []
     if isinstance(image, (str, Path)):
         img = Image.open(resolve_path(image)).convert("RGB")
@@ -841,7 +846,7 @@ def locate_drawing_views(
     model, processor = _load_vlm(model_cfg)
     max_tokens = int(model_cfg.get("max_new_tokens", 2048))
     locate_tokens = int(
-        (cfg.get("perception") or {}).get("view_regions", {}).get("locate_max_new_tokens")
+        vr_cfg.get("locate_max_new_tokens")
         or model_cfg.get("locate_max_new_tokens")
         or min(512, max_tokens)
     )
@@ -853,7 +858,11 @@ def locate_drawing_views(
         notes.append(f"view_locate_json_empty preview={preview!r}")
         return [], notes
     items = _coerce_instance_list(raw, notes=notes, tag="view_locate")
+    tighten = bool(vr_cfg.get("tighten_to_ink", True))
+    ink_thr = int(vr_cfg.get("ink_threshold", 245))
+    tight_pad = int(vr_cfg.get("tighten_pad", 2))
     views: list[dict[str, Any]] = []
+    n_tightened = 0
     for idx, item in enumerate(items):
         if not isinstance(item, dict):
             continue
@@ -870,11 +879,26 @@ def locate_drawing_views(
         if (x2 - x1) * (y2 - y1) > 0.55 * width * height:
             notes.append("view_locate_drop_near_fullpage")
             continue
+        if tighten:
+            tight = tighten_bbox_to_ink(
+                img,
+                bbox,
+                ink_threshold=ink_thr,
+                pad=tight_pad,
+            )
+            if tight != bbox:
+                n_tightened += 1
+            bbox = tight
+            x1, y1, x2, y2 = bbox
+            if x2 - x1 < 16 or y2 - y1 < 16:
+                continue
         label = str(item.get("label") or item.get("name") or f"view#{idx}").strip()
         if not label:
             label = f"view#{idx}"
         views.append({"bbox": bbox, "label": label})
     notes.append(f"view_locate_raw={len(views)}")
+    if tighten:
+        notes.append(f"view_locate_tighten={n_tightened}/{len(views)}")
     return views, notes
 
 

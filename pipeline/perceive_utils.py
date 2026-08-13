@@ -25,17 +25,37 @@ def iou_xyxy(a: list[float], b: list[float]) -> float:
     return inter / union if union > 0 else 0.0
 
 
-def nms_instances(instances: list[dict[str, Any]], iou_thr: float = 0.5) -> list[dict[str, Any]]:
-    """同类 entity 按 confidence NMS。"""
+def nms_instances(
+    instances: list[dict[str, Any]],
+    iou_thr: float = 0.5,
+    *,
+    prefer_smaller: bool = False,
+) -> list[dict[str, Any]]:
+    """同类 entity 按 confidence NMS；prefer_smaller 时同 IoU 优先保留更小框。"""
     by_eid: dict[str, list[dict[str, Any]]] = {}
     for inst in instances:
         by_eid.setdefault(inst.get("entity_id", "unknown"), []).append(inst)
     kept: list[dict[str, Any]] = []
     for group in by_eid.values():
-        group = sorted(group, key=lambda x: float(x.get("confidence") or 0), reverse=True)
+        def _sort_key(x: dict[str, Any]) -> tuple:
+            conf = float(x.get("confidence") or 0)
+            bbox = x.get("bbox") or [0, 0, 0, 0]
+            area = 0.0
+            if len(bbox) == 4:
+                area = max(0.0, float(bbox[2]) - float(bbox[0])) * max(
+                    0.0, float(bbox[3]) - float(bbox[1])
+                )
+            # prefer_smaller: 高置信优先，同置信下面积更小优先
+            return (-conf, area if prefer_smaller else -area)
+
+        group = sorted(group, key=_sort_key)
         selected: list[dict[str, Any]] = []
         for cand in group:
-            if all(iou_xyxy(cand["bbox"], s["bbox"]) < iou_thr for s in selected if s.get("bbox") and cand.get("bbox")):
+            if all(
+                iou_xyxy(cand["bbox"], s["bbox"]) < iou_thr
+                for s in selected
+                if s.get("bbox") and cand.get("bbox")
+            ):
                 selected.append(cand)
         kept.extend(selected)
     return kept
@@ -218,7 +238,7 @@ def _drop_oversized_dimension_boxes(
 
 def _view_regions_cache_fp(vr_cfg: dict[str, Any]) -> dict[str, Any]:
     return {
-        "v": 2,
+        "v": 4,
         "enabled": bool(vr_cfg.get("enabled", True)),
         "expand_ratio": float(vr_cfg.get("expand_ratio", 0.2)),
         "min_side": int(vr_cfg.get("min_side", 64)),
@@ -226,6 +246,11 @@ def _view_regions_cache_fp(vr_cfg: dict[str, Any]) -> dict[str, Any]:
         "fallback_grid": bool(vr_cfg.get("fallback_grid", True)),
         "tile_size": int(vr_cfg.get("tile_size", 1280)),
         "tile_overlap": float(vr_cfg.get("tile_overlap", 0.2)),
+        "tighten_to_ink": bool(vr_cfg.get("tighten_to_ink", True)),
+        "ink_threshold": int(vr_cfg.get("ink_threshold", 245)),
+        "tighten_pad": int(vr_cfg.get("tighten_pad", 2)),
+        "fill_uncovered_grid": bool(vr_cfg.get("fill_uncovered_grid", True)),
+        "drop_oversized_dims": bool(vr_cfg.get("drop_oversized_dims", False)),
     }
 
 
@@ -333,6 +358,7 @@ def perceive_with_cache_and_tiles(
         *,
         cache_ent: dict[str, Any] | None = None,
         drop_oversized: bool = False,
+        prefer_smaller: bool = False,
     ) -> list[dict[str, Any]]:
         if drop_oversized:
             collected = _drop_oversized_dimension_boxes(
@@ -341,7 +367,7 @@ def perceive_with_cache_and_tiles(
                 page_h=height,
                 max_area_frac=float(vr_cfg.get("max_area_frac", 0.35)),
             )
-        collected = nms_instances(collected, nms_thr)
+        collected = nms_instances(collected, nms_thr, prefer_smaller=prefer_smaller)
         fixed = []
         for c in collected or []:
             item = dict(c)
@@ -400,32 +426,42 @@ def perceive_with_cache_and_tiles(
         if use_view:
             from pipeline.perceive_common import collect_table_bboxes
             from pipeline.perceive_qwen_vl import locate_drawing_views
-            from pipeline.view_regions import resolve_part_region_specs
+            from pipeline.view_regions import (
+                assign_parent_by_components,
+                resolve_part_region_specs,
+                uncovered_grid_regions,
+            )
 
             views, vnotes = locate_drawing_views(image, config, allow_mock_fallback=True)
             notes.extend(vnotes)
             table_bbs = collect_table_bboxes(all_instances)
+            vr_tile = int(vr_cfg.get("tile_size", tile_size))
+            vr_overlap = float(vr_cfg.get("tile_overlap", overlap))
+            expand_ratio = float(vr_cfg.get("expand_ratio", 0.25))
             specs, src = resolve_part_region_specs(
                 views,
                 page_w=width,
                 page_h=height,
                 table_bboxes=table_bbs,
-                expand_ratio=float(vr_cfg.get("expand_ratio", 0.2)),
+                expand_ratio=expand_ratio,
                 min_side=int(vr_cfg.get("min_side", 64)),
                 max_area_frac=float(vr_cfg.get("max_area_frac", 0.35)),
-                tile_size=int(vr_cfg.get("tile_size", tile_size)),
-                tile_overlap=float(vr_cfg.get("tile_overlap", overlap)),
+                tile_size=vr_tile,
+                tile_overlap=vr_overlap,
                 fallback_grid=bool(vr_cfg.get("fallback_grid", True)),
             )
-            notes.append(f"view_regions:n={sum(len(s.get('regions') or []) for s in specs)}")
+            n_part_regions = sum(len(s.get("regions") or []) for s in specs)
+            notes.append(f"view_regions:n={n_part_regions}")
             notes.append(f"view_regions_source={src}")
             if src in {"grid", "full_page"}:
                 notes.append(f"view_regions_fallback={src}")
 
             component_insts: list[dict[str, Any]] = []
+            covered_for_fill: list[list[int]] = []
             for si, spec in enumerate(specs):
                 parent_id = spec.get("part_id")
                 regions = list(spec.get("regions") or [])
+                covered_for_fill.extend(regions)
                 part_collected, t_acc = _run_perceive_on_regions(
                     image=image,
                     regions=regions,
@@ -444,15 +480,43 @@ def perceive_with_cache_and_tiles(
                 if comp is not None:
                     component_insts.append(comp)
 
-            notes.append(f"view_tiled:{ent['entity_id']}:{len(specs)}")
+            # 补扫部件区未覆盖的网格（恢复架构前「整页可检」能力）
+            if bool(vr_cfg.get("fill_uncovered_grid", True)) and src == "view_regions":
+                extra = uncovered_grid_regions(
+                    covered_for_fill,
+                    page_w=width,
+                    page_h=height,
+                    table_bboxes=table_bbs,
+                    tile_size=vr_tile,
+                    tile_overlap=vr_overlap,
+                )
+                notes.append(f"view_regions_uncovered:n={len(extra)}")
+                if extra:
+                    extra_collected, t_acc = _run_perceive_on_regions(
+                        image=image,
+                        regions=extra,
+                        ent=ent,
+                        meta=meta,
+                        config=config,
+                        perceive_fn=perceive_fn,
+                        tile_dir=tile_dir / "views" / "uncovered",
+                        notes=notes,
+                        parent_id=None,
+                    )
+                    collected.extend(extra_collected)
+                    if t_acc is not None:
+                        timing_acc = t_acc
+                    collected = assign_parent_by_components(collected, component_insts)
+
+            notes.append(f"view_tiled:{ent['entity_id']}:{n_part_regions}")
+            drop_os = bool(vr_cfg.get("drop_oversized_dims", False))
             dim_fixed = _finalize_entity(
                 ent,
                 collected,
                 cache_ent=cache_ent,
-                drop_oversized=True,
+                drop_oversized=drop_os,
+                prefer_smaller=True,
             )
-            # 组件实例不进 number_mark 缓存条目；与尺寸结果一并输出
-            # 但 cache 只存尺寸，组件每次随 Pass0 重建会丢——把组件也塞进缓存列表
             bundled = list(dim_fixed) + component_insts
             cache.set(backend_name, img_sig, cache_ent, bundled)
             all_instances.extend(bundled)
@@ -488,7 +552,8 @@ def perceive_with_cache_and_tiles(
                 ent,
                 collected,
                 cache_ent=cache_ent,
-                drop_oversized=is_dim,
+                drop_oversized=False,
+                prefer_smaller=is_dim,
             )
         )
 
