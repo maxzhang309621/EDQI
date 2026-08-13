@@ -432,6 +432,91 @@ def _markdown_report(findings_payload: dict[str, Any], facts: dict[str, Any] | N
     return "\n".join(lines)
 
 
+def _view_region_rows_from_facts(facts: dict[str, Any] | None) -> list[dict[str, Any]]:
+    """部件可视化行：优先 facts.components，回退 _instances 中的 component。"""
+    if not facts:
+        return []
+    rows: list[dict[str, Any]] = []
+    for c in facts.get("components") or []:
+        if isinstance(c, dict) and c.get("bbox"):
+            rows.append(c)
+    if rows:
+        return rows
+    for inst in facts.get("_instances") or []:
+        if not isinstance(inst, dict) or not inst.get("bbox"):
+            continue
+        if str(inst.get("entity_id") or "") not in {"component", "components"}:
+            continue
+        fields = inst.get("fields") if isinstance(inst.get("fields"), dict) else {}
+        rows.append(
+            {
+                **(fields or {}),
+                "bbox": inst.get("bbox"),
+                "bbox_expanded": inst.get("bbox_expanded"),
+                "label": inst.get("label") or (fields or {}).get("label"),
+                "instance_id": inst.get("instance_id"),
+            }
+        )
+    return rows
+
+
+def _draw_view_region_boxes(
+    draw: ImageDraw.ImageDraw,
+    facts: dict[str, Any] | None,
+    *,
+    colors: dict[str, Any],
+    width_raw: int,
+    width_expanded: int,
+    show_label: bool,
+    font: ImageFont.ImageFont,
+    expand_ratio: float = 0.2,
+) -> list[tuple[tuple[int, int, int], list[str]]]:
+    """绘制部件原始框与扩展框。"""
+    rows = _view_region_rows_from_facts(facts)
+    if not rows:
+        return []
+    color_raw = tuple(colors.get("view_raw", [234, 179, 8]))  # type: ignore[assignment]
+    color_exp = tuple(colors.get("view_expanded", [239, 68, 68]))  # type: ignore[assignment]
+    page_w = int((facts or {}).get("meta", {}).get("width") or 0) or None
+    page_h = int((facts or {}).get("meta", {}).get("height") or 0) or None
+    n = 0
+    for row in rows:
+        raw = row.get("bbox")
+        exp = row.get("bbox_expanded")
+        if (not exp or len(exp) != 4) and raw and len(raw) == 4 and page_w and page_h:
+            from pipeline.view_regions import expand_view_bbox
+
+            exp = expand_view_bbox(list(raw), page_w, page_h, expand_ratio=expand_ratio)
+        label = str(row.get("label") or row.get("instance_id") or f"view#{n}")
+        if isinstance(exp, (list, tuple)) and len(exp) == 4:
+            x1, y1, x2, y2 = [int(v) for v in exp]
+            if x2 > x1 and y2 > y1:
+                draw.rectangle([x1, y1, x2, y2], outline=color_exp, width=width_expanded)
+                if show_label:
+                    tag = f"{label}/exp"
+                    tb = draw.textbbox((0, 0), tag, font=font)
+                    tw, th = tb[2] - tb[0], tb[3] - tb[1]
+                    lx, ly = x1 + 2, max(0, y1 + 2)
+                    draw.rectangle([lx, ly, lx + tw + 4, ly + th + 2], fill=(255, 255, 255))
+                    draw.text((lx + 2, ly), tag, fill=color_exp, font=font)
+        if isinstance(raw, (list, tuple)) and len(raw) == 4:
+            x1, y1, x2, y2 = [int(v) for v in raw]
+            if x2 > x1 and y2 > y1:
+                draw.rectangle([x1, y1, x2, y2], outline=color_raw, width=width_raw)
+                if show_label:
+                    tag = f"{label}/raw"
+                    tb = draw.textbbox((0, 0), tag, font=font)
+                    tw, th = tb[2] - tb[0], tb[3] - tb[1]
+                    lx, ly = x1 + 2, max(0, y1 + 2)
+                    draw.rectangle([lx, ly, lx + tw + 4, ly + th + 2], fill=(255, 255, 255))
+                    draw.text((lx + 2, ly), tag, fill=color_raw, font=font)
+        n += 1
+    return [
+        (color_raw, [f"[view] raw ×{n}", "部件原始框"]),  # type: ignore[list-item]
+        (color_exp, [f"[view] expanded ×{n}", "部件扩展框"]),  # type: ignore[list-item]
+    ]
+
+
 def render_report(
     image_path: str | Path,
     findings_payload: dict[str, Any],
@@ -452,6 +537,13 @@ def render_report(
     show_attribute_boxes = bool(render_cfg.get("show_attribute_boxes", False))
     attr_width = int(render_cfg.get("attribute_box_width", max(1, width - 1)))
     attr_label = bool(render_cfg.get("attribute_label", True))
+    show_view_regions = bool(render_cfg.get("show_view_regions", False))
+    view_raw_width = int(render_cfg.get("view_raw_box_width", width))
+    view_exp_width = int(render_cfg.get("view_expanded_box_width", max(1, width - 1)))
+    view_label = bool(render_cfg.get("view_region_label", True))
+    expand_ratio = float(
+        ((cfg.get("perception") or {}).get("view_regions") or {}).get("expand_ratio", 0.2)
+    )
 
     img = Image.open(resolve_path(image_path)).convert("RGB")
     draw = ImageDraw.Draw(img)
@@ -459,6 +551,21 @@ def render_report(
     attr_font = _font(int(render_cfg.get("attribute_font_size", 14)))
 
     legend_entries: list[tuple[tuple[int, int, int], list[str]]] = []
+
+    # 部件区：先画扩展框再画原始框
+    if show_view_regions:
+        legend_entries.extend(
+            _draw_view_region_boxes(
+                draw,
+                facts,
+                colors=colors,
+                width_raw=view_raw_width,
+                width_expanded=view_exp_width,
+                show_label=view_label,
+                font=legend_font,
+                expand_ratio=expand_ratio,
+            )
+        )
 
     # 先画属性框，再画表格与 findings，避免属性标签被完全盖住
     if show_attribute_boxes:

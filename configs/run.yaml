@@ -13,9 +13,10 @@ drawing: null
 backend: null
 
 # 规则集 / 仅跑指定规则（null=库中全部 active）
+# 调试阶段：NUM_TEXT_NO_OVERLAP 已置 draft，默认不跑数字重叠识别
 rule_set_id: default
 rule_ids: null
-# 例:
+# 例（恢复重叠规则时先改 library 中 status=active）:
 # rule_ids:
 #   - NUM_TEXT_NO_OVERLAP
 

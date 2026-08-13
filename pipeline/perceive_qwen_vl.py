@@ -801,6 +801,83 @@ def _normalize_instances(
     return out
 
 
+_VIEW_LOCATE_PROMPT = (
+    "你是工程图纸视图定位模块。请标出图中每个零件几何视图的外接框"
+    "（主视、侧视、剖视、DETAIL 局部放大、单独摆放的零件视图等）。\n"
+    "禁止框选：标题栏、物料表、图框表格、General data/总注文字块、单独的尺寸数字与公差。\n"
+    "每个独立视图一个紧致 bbox，不要把多个视图合成一个大框，不要覆盖半页空白。\n"
+    "为每个视图给出短 label（如 front / side / top / section / DETAIL_M / iso）。\n"
+    "只输出一个简短 JSON 数组，不要 markdown，不要解释。\n"
+    '每个元素格式: {"bbox_2d":[x1,y1,x2,y2],"label":"front"}\n'
+    "bbox_2d 使用 0-1000 归一化坐标。"
+)
+
+
+def locate_drawing_views(
+    image: Image.Image | str | Path,
+    config: dict[str, Any] | None = None,
+    *,
+    allow_mock_fallback: bool = True,
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """Pass0：定位零件几何视图框（含 label），供尺寸属性分区识别。
+
+    返回 (views, notes)，views 元素为 {"bbox":[x1,y1,x2,y2], "label": str}。
+    """
+    cfg = config or load_config()
+    model_cfg = cfg.get("models", {}).get("qwen3_vl", {})
+    notes: list[str] = []
+    if isinstance(image, (str, Path)):
+        img = Image.open(resolve_path(image)).convert("RGB")
+    else:
+        img = image.convert("RGB") if image.mode != "RGB" else image
+    width, height = img.size
+
+    if not model_path_ready(model_cfg):
+        notes.append("view_locate_skip=weights_not_ready")
+        if allow_mock_fallback:
+            return [], notes
+        raise FileNotFoundError(model_cfg.get("path"))
+
+    model, processor = _load_vlm(model_cfg)
+    max_tokens = int(model_cfg.get("max_new_tokens", 2048))
+    locate_tokens = int(
+        (cfg.get("perception") or {}).get("view_regions", {}).get("locate_max_new_tokens")
+        or model_cfg.get("locate_max_new_tokens")
+        or min(512, max_tokens)
+    )
+    coord_norm = float(model_cfg.get("coord_norm", 1000))
+    text = _vlm_generate(model, processor, img, _VIEW_LOCATE_PROMPT, locate_tokens)
+    raw = extract_json_payload_safe(text, default=[])
+    if raw is None or raw == []:
+        preview = (text or "").strip().replace("\n", " ")[:160]
+        notes.append(f"view_locate_json_empty preview={preview!r}")
+        return [], notes
+    items = _coerce_instance_list(raw, notes=notes, tag="view_locate")
+    views: list[dict[str, Any]] = []
+    for idx, item in enumerate(items):
+        if not isinstance(item, dict):
+            continue
+        bbox_raw = item.get("bbox_2d") or item.get("bbox")
+        if not bbox_raw:
+            continue
+        try:
+            bbox = norm_bbox_to_pixels(list(bbox_raw), width, height, coord_norm=coord_norm)
+        except Exception:
+            continue
+        x1, y1, x2, y2 = bbox
+        if x2 - x1 < 16 or y2 - y1 < 16:
+            continue
+        if (x2 - x1) * (y2 - y1) > 0.55 * width * height:
+            notes.append("view_locate_drop_near_fullpage")
+            continue
+        label = str(item.get("label") or item.get("name") or f"view#{idx}").strip()
+        if not label:
+            label = f"view#{idx}"
+        views.append({"bbox": bbox, "label": label})
+    notes.append(f"view_locate_raw={len(views)}")
+    return views, notes
+
+
 def perceive_qwen_vl(
     image_path: str | Path,
     plan: list[dict[str, Any]],

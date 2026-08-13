@@ -17,8 +17,18 @@ perception:
   tile_overlap: 0.2
   tile_dir: work_dirs/cache/tiles
   nms_iou: 0.5
-  # 仅跑数字重叠规则时，即使 --backend qwen_vl 也自动切到 OCR 多框
-  auto_number_overlap_backend: true
+  # 部件分区：先定位部件再识别尺寸属性（失败回退网格）
+  view_regions:
+    enabled: true
+    expand_ratio: 0.2
+    min_side: 64
+    max_area_frac: 0.35
+    fallback_grid: true
+    locate_max_new_tokens: 512
+    tile_size: 1280
+    tile_overlap: 0.2
+  # 调试阶段关闭：数字重叠 OCR 自动切换 / 双后端合并
+  auto_number_overlap_backend: false
   number_overlap:
     confidence_threshold: 0.35
     tile_enabled: false
@@ -99,8 +109,8 @@ drawing_parse:
   # true=仅跑表格 VLM，不合并数字重叠 OCR（facts 中无 annotations）
   tables_only: false
 
-# 同时存在数字重叠实体与 VL 解析实体时，自动双后端合并
-perception_dual_backend: true
+# 调试阶段关闭：数字重叠 OCR + VL 双后端合并（仅 VLM 部件分区属性）
+perception_dual_backend: false
 
 # 输出
 work_dirs:
@@ -126,6 +136,11 @@ render:
   attribute_box_width: 2
   attribute_label: true
   attribute_font_size: 14
+  # true=可视化部件原始框与扩展框（调试部件分区）
+  show_view_regions: true
+  view_raw_box_width: 3
+  view_expanded_box_width: 2
+  view_region_label: true
   colors:
     error: [220, 38, 38]
     warn: [234, 88, 12]
@@ -141,3 +156,6 @@ render:
     attribute_radius: [20, 184, 166]
     attribute_length: [59, 130, 246]
     attribute_angle: [168, 85, 247]
+    # 部件区（show_view_regions=true）
+    view_raw: [234, 179, 8]           # 原始框（黄）
+    view_expanded: [239, 68, 68]      # 扩展框（红）

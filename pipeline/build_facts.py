@@ -88,6 +88,8 @@ def build_facts(
             obj["keep_pair"] = True
         if inst.get("parent_id") is not None:
             obj["parent_id"] = inst.get("parent_id")
+        if inst.get("bbox_expanded") is not None:
+            obj["bbox_expanded"] = inst.get("bbox_expanded")
         if "id" not in obj and fields.get("id"):
             obj["id"] = fields["id"]
 

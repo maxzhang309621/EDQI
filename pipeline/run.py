@@ -393,13 +393,7 @@ def run(
         only_active=bool(cfg["rules"].get("only_active", True)),
         rule_ids=rule_ids,
     )
-    if not rules:
-        raise RuntimeError(
-            f"未找到 active 规则，请检查 {cfg['rules']['library_dir']}"
-            + (f" 或 rule_ids={rule_ids}" if rule_ids else "")
-        )
-
-    rule_plan = collect_entities(rules)
+    rule_plan = collect_entities(rules) if rules else []
     parse_plan = build_drawing_parse_plan(cfg, enabled=drawing_parse)
     only_tables = is_tables_only(cfg)
     if only_tables:
@@ -411,6 +405,12 @@ def run(
             )
     else:
         plan = merge_perception_plans(rule_plan, parse_plan)
+    if not rules and not plan:
+        raise RuntimeError(
+            f"未找到 active 规则且无 drawing_parse 计划，请检查 {cfg['rules']['library_dir']}"
+            + (f" 或 rule_ids={rule_ids}" if rule_ids else "")
+            + " / configs/drawing_parse.yaml"
+        )
 
     run_t0 = time.perf_counter()
     perc_t0 = time.perf_counter()

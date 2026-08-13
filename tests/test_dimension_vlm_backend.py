@@ -37,8 +37,9 @@ def test_default_backend_is_vlm():
 
 def test_merged_plan_splits_rule_ocr_and_vlm_dims():
     cfg = load_config(ROOT / "configs" / "default.yaml")
+    # 规则库 NUM_TEXT 当前为 draft；测路由时用 only_active=False 取其实体
     plan = merge_perception_plans(
-        collect_entities(load_rules(ROOT / "rules" / "library", only_active=True)),
+        collect_entities(load_rules(ROOT / "rules" / "library", only_active=False)),
         build_drawing_parse_plan(cfg),
     )
     ocr, vl = split_plan_for_backends(plan)

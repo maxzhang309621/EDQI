@@ -88,12 +88,23 @@ def test_tables_only_default_false():
 
     cfg = load_config(ROOT / "configs" / "default.yaml")
     assert is_tables_only(cfg) is False
+    # 默认仅 drawing_parse（重叠规则 draft）；VL 非空，OCR 可为空
     plan = merge_perception_plans(
         collect_entities(load_rules(ROOT / "rules" / "library", only_active=True)),
         build_drawing_parse_plan(cfg),
     )
     ocr, vl = split_plan_for_backends(plan)
-    assert ocr and vl
+    assert vl
+    assert any(e.get("parse_kind") == "dimension_marks" for e in vl)
+    assert not ocr
+
+    # 含 draft 规则实体时仍可拆出 OCR + VL
+    plan2 = merge_perception_plans(
+        collect_entities(load_rules(ROOT / "rules" / "library", only_active=False)),
+        build_drawing_parse_plan(cfg),
+    )
+    ocr2, vl2 = split_plan_for_backends(plan2)
+    assert ocr2 and vl2
 
 
 def test_tables_only_keeps_dimension_marks_from_drawing_parse():

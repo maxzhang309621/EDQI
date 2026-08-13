@@ -66,12 +66,15 @@ def test_and_or_ops():
 
 def test_validate_and_load_library():
     rules = load_rules(ROOT / "rules" / "library", only_active=True)
-    assert len(rules) >= 1
-    assert all(r.get("rule_id") == "NUM_TEXT_NO_OVERLAP" for r in rules)
+    # 调试阶段 NUM_TEXT_NO_OVERLAP 置为 draft，active 可为空
     for r in rules:
         errs = validate_rule(r)
         assert errs == [], errs
-    plan = collect_entities(rules)
+    all_rules = load_rules(ROOT / "rules" / "library", only_active=False)
+    assert any(r.get("rule_id") == "NUM_TEXT_NO_OVERLAP" for r in all_rules)
+    draft = next(r for r in all_rules if r.get("rule_id") == "NUM_TEXT_NO_OVERLAP")
+    assert draft.get("status") == "draft"
+    plan = collect_entities(all_rules)
     assert any(e["entity_id"] == "number_mark" for e in plan)
     assert not any(e["entity_id"] == "title_block" for e in plan)
 

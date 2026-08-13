@@ -84,6 +84,8 @@ class PerceptionCache:
             "section": ent.get("section"),
             # 物料表 OCR 增强变更时必须失效缓存，避免沿用空结果
             "ocr_enhance": ent.get("ocr_enhance") or {},
+            # 部件分区配置变更时失效旧网格分块缓存
+            "_perception_view_regions": ent.get("_perception_view_regions"),
         }
         return hashlib.sha1(json.dumps(payload, ensure_ascii=False, sort_keys=True).encode()).hexdigest()[:16]
 
@@ -161,10 +163,19 @@ def reindex_instances(instances: list[dict[str, Any]]) -> list[dict[str, Any]]:
     out = []
     for inst in instances:
         eid = inst.get("entity_id", "unknown")
-        idx = counters.get(eid, 0)
-        counters[eid] = idx + 1
         item = dict(inst)
-        item["instance_id"] = f"{eid}#{idx}"
+        existing = str(inst.get("instance_id") or "")
+        # 部件实例保留预设 id，避免破坏属性 parent_id 关联
+        if eid == "component" and existing.startswith("component#"):
+            item["instance_id"] = existing
+            try:
+                counters[eid] = max(counters.get(eid, 0), int(existing.split("#", 1)[1]) + 1)
+            except ValueError:
+                counters[eid] = counters.get(eid, 0) + 1
+        else:
+            idx = counters.get(eid, 0)
+            counters[eid] = idx + 1
+            item["instance_id"] = f"{eid}#{idx}"
         out.append(item)
     return out
 
@@ -174,6 +185,108 @@ def _is_table_plan_entity(ent: dict[str, Any]) -> bool:
         return True
     eid = str(ent.get("entity_id") or "")
     return eid in {"info_table", "material_table", "main_table"} or eid.endswith("_table")
+
+
+def _is_dimension_plan_entity(ent: dict[str, Any]) -> bool:
+    if str(ent.get("parse_kind") or "").lower() == "dimension_marks":
+        return True
+    return str(ent.get("entity_id") or "") == "number_mark"
+
+
+def _drop_oversized_dimension_boxes(
+    instances: list[dict[str, Any]],
+    *,
+    page_w: int,
+    page_h: int,
+    max_area_frac: float = 0.35,
+) -> list[dict[str, Any]]:
+    """丢弃半页级尺寸框，避免融框压制小标注。"""
+    page_area = max(1, int(page_w) * int(page_h))
+    thr = float(max_area_frac) * float(page_area)
+    kept: list[dict[str, Any]] = []
+    for inst in instances or []:
+        bbox = inst.get("bbox") or []
+        if len(bbox) != 4:
+            kept.append(inst)
+            continue
+        x1, y1, x2, y2 = [float(v) for v in bbox]
+        if max(0.0, x2 - x1) * max(0.0, y2 - y1) > thr:
+            continue
+        kept.append(inst)
+    return kept
+
+
+def _view_regions_cache_fp(vr_cfg: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "v": 2,
+        "enabled": bool(vr_cfg.get("enabled", True)),
+        "expand_ratio": float(vr_cfg.get("expand_ratio", 0.2)),
+        "min_side": int(vr_cfg.get("min_side", 64)),
+        "max_area_frac": float(vr_cfg.get("max_area_frac", 0.35)),
+        "fallback_grid": bool(vr_cfg.get("fallback_grid", True)),
+        "tile_size": int(vr_cfg.get("tile_size", 1280)),
+        "tile_overlap": float(vr_cfg.get("tile_overlap", 0.2)),
+    }
+
+
+def _run_perceive_on_regions(
+    *,
+    image: Any,
+    regions: list[list[int]],
+    ent: dict[str, Any],
+    meta: dict[str, Any],
+    config: dict[str, Any],
+    perceive_fn: Callable[..., dict[str, Any]],
+    tile_dir: Path,
+    notes: list[str],
+    parent_id: str | None = None,
+) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
+    """在给定全图像素区域内调用 perceive_fn，并还原坐标；可选写入 parent_id。"""
+    collected: list[dict[str, Any]] = []
+    timing_acc: dict[str, Any] | None = None
+    tile_dir.mkdir(parents=True, exist_ok=True)
+    for i, (x1, y1, x2, y2) in enumerate(regions):
+        crop = image.crop((int(x1), int(y1), int(x2), int(y2)))
+        tile_path = tile_dir / f"region_{i:02d}.png"
+        crop.save(tile_path)
+        tile_meta = {
+            **meta,
+            "width": crop.size[0],
+            "height": crop.size[1],
+            "tile_origin": [int(x1), int(y1)],
+        }
+        payload = perceive_fn(tile_path, [ent], tile_meta, config, allow_mock_fallback=True)
+        shifted = shift_instances(payload.get("instances") or [], int(x1), int(y1))
+        if parent_id:
+            for item in shifted:
+                item["parent_id"] = parent_id
+        collected.extend(shifted)
+        for n in payload.get("notes") or []:
+            notes.append(str(n))
+        if payload.get("note"):
+            notes.append(str(payload["note"]))
+        if isinstance(payload.get("timing"), dict):
+            timing_acc = dict(payload["timing"])
+    return collected, timing_acc
+
+
+def _make_component_instance(spec: dict[str, Any]) -> dict[str, Any] | None:
+    part_id = spec.get("part_id")
+    bbox = spec.get("bbox_raw")
+    if not part_id or not bbox or len(bbox) != 4:
+        return None
+    label = str(spec.get("label") or part_id)
+    return {
+        "entity_id": "component",
+        "instance_id": str(part_id),
+        "label": label,
+        "bbox": list(bbox),
+        "bbox_expanded": list(spec["bbox_expanded"]) if spec.get("bbox_expanded") else None,
+        "fields": {"label": label},
+        "raw_text": label,
+        "confidence": 0.85,
+        "needs_review": False,
+    }
 
 
 def perceive_with_cache_and_tiles(
@@ -188,6 +301,7 @@ def perceive_with_cache_and_tiles(
     """
     对每个 entity 查缓存；未命中则整图或分块调用 perceive_fn。
     表格实体（material/main）合并一次调用，以便 Pass1 后做硬分界。
+    尺寸属性（dimension_marks）优先「部件/视图分区」，失败回退网格；属性经 parent_id 关联部件。
     """
     perc_cfg = config.get("perception", {}) or {}
     cache = PerceptionCache(
@@ -199,6 +313,8 @@ def perceive_with_cache_and_tiles(
     tile_size = int(perc_cfg.get("tile_size", 1280))
     overlap = float(perc_cfg.get("tile_overlap", 0.2))
     nms_thr = float(perc_cfg.get("nms_iou", 0.5))
+    vr_cfg = perc_cfg.get("view_regions") or {}
+    view_regions_enabled = bool(vr_cfg.get("enabled", True))
 
     from PIL import Image
 
@@ -211,7 +327,20 @@ def perceive_with_cache_and_tiles(
     table_plan = [e for e in plan if _is_table_plan_entity(e)]
     other_plan = [e for e in plan if not _is_table_plan_entity(e)]
 
-    def _finalize_entity(ent: dict[str, Any], collected: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    def _finalize_entity(
+        ent: dict[str, Any],
+        collected: list[dict[str, Any]],
+        *,
+        cache_ent: dict[str, Any] | None = None,
+        drop_oversized: bool = False,
+    ) -> list[dict[str, Any]]:
+        if drop_oversized:
+            collected = _drop_oversized_dimension_boxes(
+                collected,
+                page_w=width,
+                page_h=height,
+                max_area_frac=float(vr_cfg.get("max_area_frac", 0.35)),
+            )
         collected = nms_instances(collected, nms_thr)
         fixed = []
         for c in collected or []:
@@ -220,7 +349,7 @@ def perceive_with_cache_and_tiles(
             if not item.get("label"):
                 item["label"] = ent.get("locate_query", ent["entity_id"])
             fixed.append(item)
-        cache.set(backend_name, img_sig, ent, fixed)
+        cache.set(backend_name, img_sig, cache_ent or ent, fixed)
         return fixed
 
     # ---- 表格：同批感知，保证硬分界可见两框 ----
@@ -251,16 +380,84 @@ def perceive_with_cache_and_tiles(
                 subset = [c for c in collected if c.get("entity_id") == ent["entity_id"]]
                 all_instances.extend(_finalize_entity(ent, subset))
 
-    # ---- 其它实体：仍按单实体缓存/分块 ----
+    # ---- 其它实体：尺寸走视图分区；其余仍按网格/整图 ----
     for ent in other_plan:
-        cached = cache.get(backend_name, img_sig, ent)
+        cache_ent = dict(ent)
+        is_dim = _is_dimension_plan_entity(ent)
+        if view_regions_enabled and is_dim:
+            cache_ent["_perception_view_regions"] = _view_regions_cache_fp(vr_cfg)
+        cached = cache.get(backend_name, img_sig, cache_ent)
         if cached is not None:
             all_instances.extend(cached)
             notes.append(f"cache_hit:{ent['entity_id']}")
             continue
 
-        use_tiles = tile_enabled and max(width, height) > tile_size
         collected: list[dict[str, Any]] = []
+        use_view = view_regions_enabled and is_dim
+        use_tiles = tile_enabled and max(width, height) > tile_size
+        tile_dir = resolve_path(perc_cfg.get("tile_dir", "work_dirs/cache/tiles")) / img_sig
+
+        if use_view:
+            from pipeline.perceive_common import collect_table_bboxes
+            from pipeline.perceive_qwen_vl import locate_drawing_views
+            from pipeline.view_regions import resolve_part_region_specs
+
+            views, vnotes = locate_drawing_views(image, config, allow_mock_fallback=True)
+            notes.extend(vnotes)
+            table_bbs = collect_table_bboxes(all_instances)
+            specs, src = resolve_part_region_specs(
+                views,
+                page_w=width,
+                page_h=height,
+                table_bboxes=table_bbs,
+                expand_ratio=float(vr_cfg.get("expand_ratio", 0.2)),
+                min_side=int(vr_cfg.get("min_side", 64)),
+                max_area_frac=float(vr_cfg.get("max_area_frac", 0.35)),
+                tile_size=int(vr_cfg.get("tile_size", tile_size)),
+                tile_overlap=float(vr_cfg.get("tile_overlap", overlap)),
+                fallback_grid=bool(vr_cfg.get("fallback_grid", True)),
+            )
+            notes.append(f"view_regions:n={sum(len(s.get('regions') or []) for s in specs)}")
+            notes.append(f"view_regions_source={src}")
+            if src in {"grid", "full_page"}:
+                notes.append(f"view_regions_fallback={src}")
+
+            component_insts: list[dict[str, Any]] = []
+            for si, spec in enumerate(specs):
+                parent_id = spec.get("part_id")
+                regions = list(spec.get("regions") or [])
+                part_collected, t_acc = _run_perceive_on_regions(
+                    image=image,
+                    regions=regions,
+                    ent=ent,
+                    meta=meta,
+                    config=config,
+                    perceive_fn=perceive_fn,
+                    tile_dir=tile_dir / "views" / f"part_{si:02d}",
+                    notes=notes,
+                    parent_id=str(parent_id) if parent_id else None,
+                )
+                collected.extend(part_collected)
+                if t_acc is not None:
+                    timing_acc = t_acc
+                comp = _make_component_instance(spec)
+                if comp is not None:
+                    component_insts.append(comp)
+
+            notes.append(f"view_tiled:{ent['entity_id']}:{len(specs)}")
+            dim_fixed = _finalize_entity(
+                ent,
+                collected,
+                cache_ent=cache_ent,
+                drop_oversized=True,
+            )
+            # 组件实例不进 number_mark 缓存条目；与尺寸结果一并输出
+            # 但 cache 只存尺寸，组件每次随 Pass0 重建会丢——把组件也塞进缓存列表
+            bundled = list(dim_fixed) + component_insts
+            cache.set(backend_name, img_sig, cache_ent, bundled)
+            all_instances.extend(bundled)
+            continue
+
         if not use_tiles:
             payload = perceive_fn(image_path, [ent], meta, config, allow_mock_fallback=True)
             collected = list(payload.get("instances") or [])
@@ -272,26 +469,28 @@ def perceive_with_cache_and_tiles(
                 timing_acc = dict(payload["timing"])
         else:
             tiles = make_tiles(width, height, tile_size=tile_size, overlap=overlap)
-            tile_dir = resolve_path(perc_cfg.get("tile_dir", "work_dirs/cache/tiles")) / img_sig
-            tile_dir.mkdir(parents=True, exist_ok=True)
-            for i, (x1, y1, x2, y2) in enumerate(tiles):
-                crop = image.crop((x1, y1, x2, y2))
-                tile_path = tile_dir / f"tile_{i:02d}.png"
-                crop.save(tile_path)
-                tile_meta = {
-                    **meta,
-                    "width": crop.size[0],
-                    "height": crop.size[1],
-                    "tile_origin": [x1, y1],
-                }
-                payload = perceive_fn(tile_path, [ent], tile_meta, config, allow_mock_fallback=True)
-                shifted = shift_instances(payload.get("instances") or [], x1, y1)
-                collected.extend(shifted)
-                for n in payload.get("notes") or []:
-                    notes.append(str(n))
+            collected, t_acc = _run_perceive_on_regions(
+                image=image,
+                regions=[list(t) for t in tiles],
+                ent=ent,
+                meta=meta,
+                config=config,
+                perceive_fn=perceive_fn,
+                tile_dir=tile_dir,
+                notes=notes,
+            )
+            if t_acc is not None:
+                timing_acc = t_acc
             notes.append(f"tiled:{ent['entity_id']}:{len(tiles)}")
 
-        all_instances.extend(_finalize_entity(ent, collected))
+        all_instances.extend(
+            _finalize_entity(
+                ent,
+                collected,
+                cache_ent=cache_ent,
+                drop_oversized=is_dim,
+            )
+        )
 
     out: dict[str, Any] = {
         "backend": backend_name,

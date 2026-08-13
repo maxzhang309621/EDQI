@@ -1,0 +1,306 @@
+"""部件/视图感知分区：由视图框生成尺寸识别区（外扩、扣表格、过大过滤）。"""
+from __future__ import annotations
+
+from typing import Any
+
+
+def _area(bbox: list[int]) -> float:
+    x1, y1, x2, y2 = bbox
+    return max(0, x2 - x1) * max(0, y2 - y1)
+
+
+def _clamp_bbox(bbox: list[int], page_w: int, page_h: int) -> list[int]:
+    x1, y1, x2, y2 = [int(v) for v in bbox]
+    x1 = max(0, min(page_w - 1, x1))
+    y1 = max(0, min(page_h - 1, y1))
+    x2 = max(0, min(page_w, x2))
+    y2 = max(0, min(page_h, y2))
+    if x2 <= x1:
+        x2 = min(page_w, x1 + 1)
+    if y2 <= y1:
+        y2 = min(page_h, y1 + 1)
+    return [x1, y1, x2, y2]
+
+
+def expand_view_bbox(
+    bbox: list[int],
+    page_w: int,
+    page_h: int,
+    *,
+    expand_ratio: float = 0.2,
+) -> list[int]:
+    """按比例外扩视图框，覆盖周围尺寸标注。"""
+    x1, y1, x2, y2 = [int(v) for v in bbox]
+    bw, bh = max(1, x2 - x1), max(1, y2 - y1)
+    dx = int(bw * float(expand_ratio))
+    dy = int(bh * float(expand_ratio))
+    return _clamp_bbox([x1 - dx, y1 - dy, x2 + dx, y2 + dy], page_w, page_h)
+
+
+def _overlap_xyxy(a: list[int], b: list[int]) -> bool:
+    return not (a[2] <= b[0] or b[2] <= a[0] or a[3] <= b[1] or b[3] <= a[1])
+
+
+def shrink_region_away_from_tables(
+    region: list[int],
+    table_bboxes: list[list[int]] | None,
+) -> list[int] | None:
+    """识别区避开表格：中心落表内则丢弃；与表重叠则单边裁切取最大剩余。"""
+    if not table_bboxes:
+        return list(region)
+    x1, y1, x2, y2 = [int(v) for v in region]
+    for tb in table_bboxes:
+        if not tb or len(tb) != 4:
+            continue
+        tx1, ty1, tx2, ty2 = [int(v) for v in tb]
+        cx, cy = (x1 + x2) / 2.0, (y1 + y2) / 2.0
+        if tx1 <= cx <= tx2 and ty1 <= cy <= ty2:
+            return None
+        cur = [x1, y1, x2, y2]
+        if not _overlap_xyxy(cur, [tx1, ty1, tx2, ty2]):
+            continue
+        candidates = [
+            [x1, y1, x2, min(y2, ty1)],
+            [x1, max(y1, ty2), x2, y2],
+            [x1, y1, min(x2, tx1), y2],
+            [max(x1, tx2), y1, x2, y2],
+        ]
+        best: list[int] | None = None
+        best_area = -1.0
+        for c in candidates:
+            if c[2] - c[0] < 8 or c[3] - c[1] < 8:
+                continue
+            if _overlap_xyxy(c, [tx1, ty1, tx2, ty2]):
+                continue
+            a = _area(c)
+            if a > best_area:
+                best_area = a
+                best = c
+        if best is None:
+            return None
+        x1, y1, x2, y2 = best
+    if x2 - x1 < 8 or y2 - y1 < 8:
+        return None
+    return [x1, y1, x2, y2]
+
+
+def is_region_too_small(bbox: list[int], *, min_side: int = 64) -> bool:
+    x1, y1, x2, y2 = bbox
+    return (x2 - x1) < min_side or (y2 - y1) < min_side
+
+
+def is_region_too_large(
+    bbox: list[int],
+    page_w: int,
+    page_h: int,
+    *,
+    max_area_frac: float = 0.35,
+) -> bool:
+    page_area = max(1, int(page_w) * int(page_h))
+    return _area(bbox) / float(page_area) > float(max_area_frac)
+
+
+def split_large_region(
+    bbox: list[int],
+    *,
+    tile_size: int = 1280,
+    overlap: float = 0.2,
+) -> list[list[int]]:
+    """过大识别区按局部网格拆分（坐标仍为全图）。"""
+    from pipeline.perceive_utils import make_tiles
+
+    x1, y1, x2, y2 = bbox
+    w, h = x2 - x1, y2 - y1
+    if max(w, h) <= tile_size:
+        return [list(bbox)]
+    local = make_tiles(w, h, tile_size=tile_size, overlap=overlap)
+    return [[x1 + a, y1 + b, x1 + c, y1 + d] for a, b, c, d in local]
+
+
+def build_view_regions(
+    view_bboxes: list[list[int]] | None,
+    *,
+    page_w: int,
+    page_h: int,
+    table_bboxes: list[list[int]] | None = None,
+    expand_ratio: float = 0.2,
+    min_side: int = 64,
+    max_area_frac: float = 0.35,
+    tile_size: int = 1280,
+    tile_overlap: float = 0.2,
+) -> list[list[int]]:
+    """视图框 → 尺寸识别区列表（已外扩、扣表、过滤/拆分过大）。"""
+    regions: list[list[int]] = []
+    for vb in view_bboxes or []:
+        if not vb or len(vb) != 4:
+            continue
+        expanded = expand_view_bbox(vb, page_w, page_h, expand_ratio=expand_ratio)
+        shrunk = shrink_region_away_from_tables(expanded, table_bboxes)
+        if shrunk is None:
+            continue
+        shrunk = _clamp_bbox(shrunk, page_w, page_h)
+        if is_region_too_small(shrunk, min_side=min_side):
+            continue
+        if is_region_too_large(shrunk, page_w, page_h, max_area_frac=max_area_frac):
+            parts = split_large_region(shrunk, tile_size=tile_size, overlap=tile_overlap)
+            for p in parts:
+                p = _clamp_bbox(p, page_w, page_h)
+                if is_region_too_small(p, min_side=min_side):
+                    continue
+                p2 = shrink_region_away_from_tables(p, table_bboxes)
+                if p2 is None or is_region_too_small(p2, min_side=min_side):
+                    continue
+                regions.append(_clamp_bbox(p2, page_w, page_h))
+            continue
+        regions.append(shrunk)
+    return regions
+
+
+def build_part_region_specs(
+    views: list[dict[str, Any]] | None,
+    *,
+    page_w: int,
+    page_h: int,
+    table_bboxes: list[list[int]] | None = None,
+    expand_ratio: float = 0.2,
+    min_side: int = 64,
+    max_area_frac: float = 0.35,
+    tile_size: int = 1280,
+    tile_overlap: float = 0.2,
+) -> tuple[list[dict[str, Any]], str]:
+    """由带 label 的视图生成识别规格；无有效视图时回退网格。
+
+    返回 (specs, source)。spec 含:
+      part_id, label, bbox_raw, bbox_expanded, regions[]
+    source: view_regions | grid | full_page
+    """
+    specs: list[dict[str, Any]] = []
+    for i, view in enumerate(views or []):
+        if not isinstance(view, dict):
+            continue
+        bbox = view.get("bbox")
+        if not bbox or len(bbox) != 4:
+            continue
+        raw = _clamp_bbox(list(bbox), page_w, page_h)
+        label = str(view.get("label") or f"view#{i}").strip() or f"view#{i}"
+        part_id = f"component#{i}"
+        expanded = expand_view_bbox(raw, page_w, page_h, expand_ratio=expand_ratio)
+        regions = build_view_regions(
+            [raw],
+            page_w=page_w,
+            page_h=page_h,
+            table_bboxes=table_bboxes,
+            expand_ratio=expand_ratio,
+            min_side=min_side,
+            max_area_frac=max_area_frac,
+            tile_size=tile_size,
+            tile_overlap=tile_overlap,
+        )
+        if not regions:
+            continue
+        specs.append(
+            {
+                "part_id": part_id,
+                "label": label,
+                "bbox_raw": raw,
+                "bbox_expanded": expanded,
+                "regions": regions,
+            }
+        )
+    if specs:
+        return specs, "view_regions"
+    return [], "empty"
+
+
+def resolve_dimension_regions(
+    view_bboxes: list[list[int]] | None,
+    *,
+    page_w: int,
+    page_h: int,
+    table_bboxes: list[list[int]] | None = None,
+    expand_ratio: float = 0.2,
+    min_side: int = 64,
+    max_area_frac: float = 0.35,
+    tile_size: int = 1280,
+    tile_overlap: float = 0.2,
+    fallback_grid: bool = True,
+) -> tuple[list[list[int]], str]:
+    """生成尺寸识别区；无有效视图时可选回退全图网格。
+
+    返回 (regions, source) source 为 view_regions | grid | full_page。
+    """
+    regions = build_view_regions(
+        view_bboxes,
+        page_w=page_w,
+        page_h=page_h,
+        table_bboxes=table_bboxes,
+        expand_ratio=expand_ratio,
+        min_side=min_side,
+        max_area_frac=max_area_frac,
+        tile_size=tile_size,
+        tile_overlap=tile_overlap,
+    )
+    if regions:
+        return regions, "view_regions"
+    if not fallback_grid:
+        return [[0, 0, page_w, page_h]], "full_page"
+    from pipeline.perceive_utils import make_tiles
+
+    if max(page_w, page_h) <= tile_size:
+        return [[0, 0, page_w, page_h]], "full_page"
+    tiles = make_tiles(page_w, page_h, tile_size=tile_size, overlap=tile_overlap)
+    return [list(t) for t in tiles], "grid"
+
+
+def resolve_part_region_specs(
+    views: list[dict[str, Any]] | None,
+    *,
+    page_w: int,
+    page_h: int,
+    table_bboxes: list[list[int]] | None = None,
+    expand_ratio: float = 0.2,
+    min_side: int = 64,
+    max_area_frac: float = 0.35,
+    tile_size: int = 1280,
+    tile_overlap: float = 0.2,
+    fallback_grid: bool = True,
+) -> tuple[list[dict[str, Any]], str]:
+    """部件规格列表；失败时回退为无 parent 的网格规格。"""
+    specs, src = build_part_region_specs(
+        views,
+        page_w=page_w,
+        page_h=page_h,
+        table_bboxes=table_bboxes,
+        expand_ratio=expand_ratio,
+        min_side=min_side,
+        max_area_frac=max_area_frac,
+        tile_size=tile_size,
+        tile_overlap=tile_overlap,
+    )
+    if specs:
+        return specs, src
+    regions, grid_src = resolve_dimension_regions(
+        [],
+        page_w=page_w,
+        page_h=page_h,
+        table_bboxes=table_bboxes,
+        expand_ratio=expand_ratio,
+        min_side=min_side,
+        max_area_frac=max_area_frac,
+        tile_size=tile_size,
+        tile_overlap=tile_overlap,
+        fallback_grid=fallback_grid,
+    )
+    # 网格回退：无部件关联
+    return (
+        [
+            {
+                "part_id": None,
+                "label": "grid",
+                "bbox_raw": None,
+                "bbox_expanded": None,
+                "regions": regions,
+            }
+        ],
+        grid_src,
+    )
