@@ -42,6 +42,10 @@ objects:
     # 覆盖全部配置斜向角（首读成功则不会跑满）
     vlm_orientation_retry_max: 8
     vlm_oblique_angles: [30, 60, 120, 150, 210, 240, 300, 330]
+    # 小字适配（可覆盖 perception.dimension_vlm）
+    vlm_locate_min_side: 1536
+    vlm_multi_scale: true
+    vlm_pass2_min_side: 128
     # 尺寸属性排除表格框：vlm/ocr 均生效（框内数字不当尺寸）
     exclude_table_regions: true
     exclude_table_pad: 2

@@ -138,6 +138,30 @@ def test_deskew_crop_rotates_and_upsizes():
     assert max(out.size) >= 64
 
 
+def test_upscale_and_merge_dimension_boxes():
+    from pipeline.perceive_qwen_vl import (
+        _merge_dimension_boxes,
+        _scale_bbox_to_original,
+        _upscale_image_to_min_side,
+    )
+
+    img = Image.new("RGB", (800, 600), (255, 255, 255))
+    up, scale = _upscale_image_to_min_side(img, min_side=1536, max_scale=2.5, max_side=4096)
+    assert scale > 1.0
+    assert min(up.size) >= 1400
+    bb = _scale_bbox_to_original([100, 100, 200, 140], scale)
+    assert bb[0] < 100
+
+    merged = _merge_dimension_boxes(
+        [
+            [{"bbox": [10, 10, 40, 30], "confidence": 0.9, "entity_id": "number_mark"}],
+            [{"bbox": [12, 12, 38, 28], "confidence": 0.8, "entity_id": "number_mark"}],
+            [{"bbox": [200, 200, 240, 230], "confidence": 0.85, "entity_id": "number_mark"}],
+        ]
+    )
+    assert len(merged) == 2
+
+
 def test_dimension_read_looks_weak():
     assert _dimension_read_looks_weak({}) is True
     assert _dimension_read_looks_weak({"text": "abc"}) is True

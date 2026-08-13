@@ -106,6 +106,8 @@ class PerceptionCache:
             "ocr_enhance": ent.get("ocr_enhance") or {},
             # 部件分区配置变更时失效旧网格分块缓存
             "_perception_view_regions": ent.get("_perception_view_regions"),
+            # 尺寸多尺度/小字放大配置变更时失效缓存
+            "_perception_dim_vlm": ent.get("_perception_dim_vlm"),
         }
         return hashlib.sha1(json.dumps(payload, ensure_ascii=False, sort_keys=True).encode()).hexdigest()[:16]
 
@@ -412,6 +414,17 @@ def perceive_with_cache_and_tiles(
         is_dim = _is_dimension_plan_entity(ent)
         if view_regions_enabled and is_dim:
             cache_ent["_perception_view_regions"] = _view_regions_cache_fp(vr_cfg)
+        if is_dim:
+            dcfg = (config.get("perception") or {}).get("dimension_vlm") or {}
+            cache_ent["_perception_dim_vlm"] = {
+                "v": 1,
+                "enabled": bool(dcfg.get("enabled", True)),
+                "locate_min_side": int(dcfg.get("locate_min_side", 1536)),
+                "locate_max_scale": float(dcfg.get("locate_max_scale", 2.5)),
+                "locate_max_side": int(dcfg.get("locate_max_side", 2560)),
+                "multi_scale": bool(dcfg.get("multi_scale", True)),
+                "pass2_min_side": int(dcfg.get("pass2_min_side", 128)),
+            }
         cached = cache.get(backend_name, img_sig, cache_ent)
         if cached is not None:
             all_instances.extend(cached)

@@ -221,13 +221,14 @@ def _dimension_marks_locate_rules() -> list[str]:
     return [
         "对于尺寸标注（parse_kind=dimension_marks / number_mark）：",
         "只定位视图中的尺寸数字与公差标注（含 Ø/⌀/Φ 直径、R 半径、长度、角度°、±公差）。",
+        "图面可能含很小的尺寸字——仍须逐个检出，不要因字号小而漏检或合并。",
         "必须同时检出水平、竖排，以及约 30°/60°/120°/150°/210°/240°/300°/330° 等斜向尺寸文字；"
         "竖排/倾斜的数字也要各自给出 bbox，勿因朝向漏检。",
         "禁止定位：标题栏/图框表格内任何文字与数字（material_table / main_table 框内一律不要）、"
         "图号、材料牌号、BOM、Siemens/版权、比例、页码、"
         "零件名、表面粗糙度符号旁的非尺寸长串、坐标轴刻度。",
         "只定位视图区尺寸标注；表格框内即使有数字也禁止输出 bbox。",
-        "每个独立尺寸标注各一个 bbox；重叠/压盖的尺寸也要分开框。",
+        "每个独立尺寸标注各一个 bbox；重叠/压盖的尺寸也要分开框；bbox 尽量贴紧数字本身。",
     ]
 
 
@@ -236,7 +237,7 @@ def _dimension_marks_pass2_prompt(ent: dict[str, Any]) -> str:
     return (
         "读取该局部图中的工程尺寸标注属性。只输出 JSON。\n"
         "局部图可能已旋转至近水平；也可能仍含竖排或倾斜文字——按工程图正向阅读顺序识读，"
-        "勿把竖排数字读反或漏读。\n"
+        "勿把竖排数字读反或漏读。字号可能很小，仍须仔细识读。\n"
         "若裁剪区不是尺寸标注（图号/材料/标题栏/表格单元格等），fields 全部填 null。\n"
         f"字段: {field_desc}\n"
         "规则:\n"
@@ -250,8 +251,97 @@ def _dimension_marks_pass2_prompt(ent: dict[str, Any]) -> str:
     )
 
 
+def _dim_vlm_scale_cfg(cfg: dict[str, Any], ent: dict[str, Any] | None = None) -> dict[str, Any]:
+    """尺寸 VLM 多尺度/放大配置（entity 可覆盖 perception.dimension_vlm）。"""
+    base = dict((cfg.get("perception") or {}).get("dimension_vlm") or {})
+    if not ent:
+        return base
+    mapping = {
+        "locate_min_side": ("locate_min_side", "vlm_locate_min_side"),
+        "locate_max_scale": ("locate_max_scale", "vlm_locate_max_scale"),
+        "locate_max_side": ("locate_max_side", "vlm_locate_max_side"),
+        "multi_scale": ("multi_scale", "vlm_multi_scale"),
+        "pass2_min_side": ("pass2_min_side", "vlm_pass2_min_side"),
+        "enabled": ("dimension_vlm_enabled", "vlm_dim_scale_enabled"),
+    }
+    for key, aliases in mapping.items():
+        for a in aliases:
+            if ent.get(a) is not None:
+                base[key] = ent.get(a)
+                break
+    return base
+
+
+def _upscale_image_to_min_side(
+    image: Image.Image,
+    *,
+    min_side: int,
+    max_scale: float = 2.5,
+    max_side: int = 2560,
+) -> tuple[Image.Image, float]:
+    """将短边放大到至少 min_side（受 max_scale/max_side 限制），返回 (图, scale)。"""
+    w, h = image.size
+    short = max(1, min(w, h))
+    long = max(w, h)
+    target = int(min_side)
+    if short >= target:
+        return image, 1.0
+    scale = float(target) / float(short)
+    scale = min(scale, float(max_scale))
+    if long * scale > float(max_side):
+        scale = float(max_side) / float(long)
+    if scale <= 1.0 + 1e-6:
+        return image, 1.0
+    nw = max(1, int(round(w * scale)))
+    nh = max(1, int(round(h * scale)))
+    out = image.resize((nw, nh), Image.Resampling.LANCZOS)
+    return out, float(nw) / float(w)
+
+
+def _scale_bbox_to_original(bbox: list[int], scale: float) -> list[int]:
+    if scale <= 1e-6:
+        return list(bbox)
+    return [int(round(float(v) / scale)) for v in bbox]
+
+
+def _merge_dimension_boxes(
+    batches: list[list[dict[str, Any]]],
+    *,
+    iou_thr: float = 0.45,
+) -> list[dict[str, Any]]:
+    """合并多尺度 Pass1 框，优先保留更小更紧的框。"""
+    from pipeline.perceive_utils import iou_xyxy
+
+    flat: list[dict[str, Any]] = []
+    for batch in batches:
+        flat.extend(batch or [])
+    if not flat:
+        return []
+    def _area(b: list[Any]) -> float:
+        if not b or len(b) != 4:
+            return 0.0
+        return max(0.0, float(b[2]) - float(b[0])) * max(0.0, float(b[3]) - float(b[1]))
+
+    flat = sorted(
+        flat,
+        key=lambda x: (-float(x.get("confidence") or 0.8), _area(x.get("bbox") or [])),
+    )
+    kept: list[dict[str, Any]] = []
+    for cand in flat:
+        bb = cand.get("bbox")
+        if not bb or len(bb) != 4:
+            continue
+        if all(
+            iou_xyxy(bb, s["bbox"]) < iou_thr
+            for s in kept
+            if s.get("bbox")
+        ):
+            kept.append(cand)
+    return kept
+
+
 def _deskew_crop_for_vlm(crop: Image.Image, angle_deg: float, *, min_side: int = 64) -> Image.Image:
-    """将裁剪旋到近水平，过小则放大，便于 VLM 识读竖排/倾斜尺寸。"""
+    """将裁剪旋到近水平，过小则放大，便于 VLM 识读竖排/倾斜/小字尺寸。"""
     ang = float(angle_deg)
     while ang < -180.0:
         ang += 360.0
@@ -261,14 +351,15 @@ def _deskew_crop_for_vlm(crop: Image.Image, angle_deg: float, *, min_side: int =
     if abs(ang) >= 1e-3:
         out = crop.rotate(-ang, expand=True, fillcolor=(255, 255, 255))
     dw, dh = out.size
-    if max(dw, dh) < min_side and max(dw, dh) > 0:
-        scale = float(min_side) / float(max(dw, dh))
+    # 短边不足则放大（小字 Pass2）
+    short = max(1, min(dw, dh))
+    if short < int(min_side) and short > 0:
+        scale = float(min_side) / float(short)
         out = out.resize(
             (max(1, int(dw * scale)), max(1, int(dh * scale))),
             Image.Resampling.LANCZOS,
         )
     return out
-
 
 def _dimension_read_looks_weak(fields: dict[str, Any] | None) -> bool:
     """Pass2 结果是否过弱，值得换朝向再试。"""
@@ -404,6 +495,7 @@ def _read_dimension_crop_with_orientation(
     bbox: list[Any] | None,
     max_tokens: int,
     notes: list[str] | None = None,
+    pass2_min_side: int = 128,
 ) -> tuple[dict[str, Any], str]:
     """对尺寸裁剪做 deskew / 有限朝向重试，取首个非弱结果。"""
     field_prompt = _dimension_marks_pass2_prompt(ent)
@@ -411,7 +503,7 @@ def _read_dimension_crop_with_orientation(
     best_fields: dict[str, Any] = {}
     best_raw = ""
     for i, ang in enumerate(angles):
-        view = _deskew_crop_for_vlm(crop, ang)
+        view = _deskew_crop_for_vlm(crop, ang, min_side=int(pass2_min_side))
         text2 = _vlm_generate(model, processor, view, field_prompt, max_tokens)
         fields, raw_text = _parse_dimension_pass2_fields(text2, bbox=bbox, read_angle=ang)
         if notes is not None and i > 0:
@@ -939,16 +1031,72 @@ def perceive_qwen_vl(
     if two_pass:
         # Pass1 只要短 bbox JSON；过大 max_new_tokens 易废话截断导致整表丢失
         locate_tokens = int(model_cfg.get("locate_max_new_tokens") or min(768, max_tokens))
-        text1 = _vlm_generate(
-            model, processor, image, _build_plan_prompt(plan, locate_only=True), locate_tokens
-        )
-        raw1 = extract_json_payload_safe(text1, default=[])
         notes: list[str] = []
-        if raw1 is None or raw1 == []:
-            preview = (text1 or "").strip().replace("\n", " ")[:240]
-            notes.append(f"pass1_json_empty preview={preview!r}")
-        raw1 = _coerce_instance_list(raw1, notes=notes, tag="pass1")
-        boxes = _normalize_instances(list(raw1), plan, width, height, coord_norm)
+        has_dims = any(_is_dimension_marks_entity(e) for e in plan)
+        dim_ent = next((e for e in plan if _is_dimension_marks_entity(e)), None)
+        scale_cfg = _dim_vlm_scale_cfg(cfg, dim_ent)
+        dim_scale_on = bool(scale_cfg.get("enabled", True)) and has_dims and not any(
+            _is_table_entity(e) for e in plan
+        )
+
+        locate_batches: list[list[dict[str, Any]]] = []
+        if dim_scale_on:
+            # 原分辨率 + 放大（适配大图小字）
+            scales_to_run: list[tuple[Image.Image, float, str]] = [(image, 1.0, "1x")]
+            up_img, up_s = _upscale_image_to_min_side(
+                image,
+                min_side=int(scale_cfg.get("locate_min_side", 1536)),
+                max_scale=float(scale_cfg.get("locate_max_scale", 2.5)),
+                max_side=int(scale_cfg.get("locate_max_side", 2560)),
+            )
+            multi = bool(scale_cfg.get("multi_scale", True))
+            if up_s > 1.0 + 1e-6:
+                if multi:
+                    scales_to_run.append((up_img, up_s, f"{up_s:.2f}x"))
+                else:
+                    scales_to_run = [(up_img, up_s, f"{up_s:.2f}x")]
+            for loc_img, sc, tag in scales_to_run:
+                lw, lh = loc_img.size
+                text1 = _vlm_generate(
+                    model,
+                    processor,
+                    loc_img,
+                    _build_plan_prompt(plan, locate_only=True),
+                    locate_tokens,
+                )
+                raw1 = extract_json_payload_safe(text1, default=[])
+                if raw1 is None or raw1 == []:
+                    preview = (text1 or "").strip().replace("\n", " ")[:240]
+                    notes.append(f"pass1_json_empty scale={tag} preview={preview!r}")
+                raw1 = _coerce_instance_list(raw1 or [], notes=notes, tag=f"pass1_{tag}")
+                boxes_s = _normalize_instances(list(raw1), plan, lw, lh, coord_norm)
+                if sc > 1.0 + 1e-6:
+                    for b in boxes_s:
+                        bb = _scale_bbox_to_original(list(b["bbox"]), sc)
+                        bb[0] = max(0, min(width - 1, bb[0]))
+                        bb[1] = max(0, min(height - 1, bb[1]))
+                        bb[2] = max(0, min(width, bb[2]))
+                        bb[3] = max(0, min(height, bb[3]))
+                        if bb[2] <= bb[0]:
+                            bb[2] = min(width, bb[0] + 1)
+                        if bb[3] <= bb[1]:
+                            bb[3] = min(height, bb[1] + 1)
+                        b["bbox"] = bb
+                locate_batches.append(boxes_s)
+                notes.append(f"dim_locate_scale={tag}:n={len(boxes_s)}")
+            boxes = _merge_dimension_boxes(locate_batches)
+            notes.append(f"dim_locate_merged:n={len(boxes)}")
+        else:
+            text1 = _vlm_generate(
+                model, processor, image, _build_plan_prompt(plan, locate_only=True), locate_tokens
+            )
+            raw1 = extract_json_payload_safe(text1, default=[])
+            if raw1 is None or raw1 == []:
+                preview = (text1 or "").strip().replace("\n", " ")[:240]
+                notes.append(f"pass1_json_empty preview={preview!r}")
+            raw1 = _coerce_instance_list(raw1, notes=notes, tag="pass1")
+            boxes = _normalize_instances(list(raw1), plan, width, height, coord_norm)
+
         boxes, bound_notes = refine_material_main_boxes(
             image, boxes, page_w=width, page_h=height, plan=plan
         )
@@ -959,6 +1107,7 @@ def perceive_qwen_vl(
         )
 
         instances = []
+        pass2_min_side = int(scale_cfg.get("pass2_min_side", 128)) if dim_scale_on else 64
         for box_inst in boxes:
             eid = box_inst["entity_id"]
             ent = next((e for e in plan if e["entity_id"] == eid), None)
@@ -1027,6 +1176,7 @@ def perceive_qwen_vl(
                         bbox=box_inst.get("bbox"),
                         max_tokens=tok,
                         notes=notes,
+                        pass2_min_side=pass2_min_side,
                     )
                 else:
                     text2 = _vlm_generate(model, processor, crop, field_prompt, tok)

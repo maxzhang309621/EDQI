@@ -39,6 +39,17 @@ perception:
     drop_oversized_dims: false
   # 调试阶段关闭：数字重叠 OCR 自动切换 / 双后端合并
   auto_number_overlap_backend: false
+  # 尺寸 VLM：大图小字自适应放大 + 多尺度 Pass1
+  dimension_vlm:
+    enabled: true
+    # Pass1 输入短边至少这么大（相对 tile/部件区 crop 放大）
+    locate_min_side: 1536
+    locate_max_scale: 2.5
+    locate_max_side: 2560
+    # true=原分辨率与放大各跑一次 Pass1 再合并
+    multi_scale: true
+    # Pass2 局部裁剪短边至少这么大
+    pass2_min_side: 128
   number_overlap:
     confidence_threshold: 0.35
     tile_enabled: false
