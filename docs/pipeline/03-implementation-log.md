@@ -1,25 +1,40 @@
-# 实现日志：部件粗边框识别 + 扩展收紧
+# 实现日志：粗线四边界生成部件 raw 框（抑幽灵）
 
-- 日期：2026-08-14
-- 任务：T1–T3（见 `02-algorithm-plan.md`）
-- 实现者：algorithm-implementer
+## 任务完成情况
 
-## 实现内容
+| 任务 ID | 实现内容 | 状态 |
+|---------|----------|------|
+| T1 | `extract_thick_strokes` + `_binarize_ink`（灰底自适应阈值；OPEN 过猛降核） | 完成 |
+| T2 | `propose_boxes_from_thick_boundaries`（CC 外接框） | 完成 |
+| T3 | `filter_ghost_boxes`（四边证据/密度/表冲突/IoU-NMS） | 完成 |
+| T4 | `locate_views_from_thick_boundaries`；`locate_drawing_views` 默认 `thick_boundary`；config；指纹 v6 | 完成 |
 
-| 任务 | 变更 |
-|------|------|
-| T1 | `view_regions.tighten_bbox_to_thick_outline` / `tighten_view_bbox`；单测粗框+细线噪声 |
-| T2 | Pass0 提示强调粗实线；`locate_drawing_views` 走 thick_outline；`expand_ratio` 0.28→0.18 |
-| T3 | `_view_regions_cache_fp` v5 含 `tighten_mode` / `thick_min_width` |
+## 主要改动文件
+
+- `pipeline/view_regions.py`：C1–C3 纯函数 + `locate_views_from_thick_boundaries`
+- `pipeline/perceive_qwen_vl.py`：`propose_mode` 接入；VLM 抽为 `_locate_drawing_views_vlm` 兜底
+- `pipeline/perceive_utils.py`：`_view_regions_cache_fp` → v6
+- `configs/default.yaml`：新增 propose/反幽灵配置
+- `tests/test_view_regions.py`：新增 4 例单测
 
 ## 冒烟结果
 
-```text
-pytest tests/test_view_regions.py → 13 passed
-run_demo.py → passed=True
-pytest tests/ --ignore=test_m4_hardening → 91 passed
 ```
+pytest tests/test_view_regions.py → 16 passed
+pytest tests/ --ignore=tests/test_m4_hardening.py → 95 passed
+
+demo_drawing locate_drawing_views:
+  view_propose_mode=thick_boundary
+  thick_boundary_raw=2 → kept=2
+  view_locate_source=thick
+  boxes: [80,80,505,405], [650,650,1155,825]（均 side_evidence=4）
+```
+
+## 踩坑
+
+- `demo_drawing` 背景灰度 244，固定 `ink_threshold=245` 会整页变墨迹 → `_binarize_ink` 饱和时改用 `P90-20`
+- 图中「粗线」仅约 2px，OPEN 核强制 ≥3 会消掉轮廓 → 降核回退保留 ≥8% 墨迹
 
 ## 遗留
 
-- 真实大图线宽差异大时，可调 `thick_min_width`（默认 3）；过强则回退全墨迹收紧
+- `tests/test_m4_hardening.py` 收集期缺 `_bootstrap`（与本任务无关的既有问题）

@@ -195,3 +195,107 @@ def test_assign_parent_by_components():
     out = assign_parent_by_components(insts, comps)
     assert out[0]["parent_id"] == "component#0"
     assert out[1]["parent_id"] == "component#9"
+
+
+def test_extract_thick_strokes_suppresses_thin_lines():
+    from PIL import Image, ImageDraw
+
+    from pipeline.view_regions import extract_thick_strokes
+
+    img = Image.new("RGB", (300, 300), (255, 255, 255))
+    draw = ImageDraw.Draw(img)
+    draw.rectangle([80, 80, 220, 220], outline=(0, 0, 0), width=5)
+    draw.line([(20, 150), (70, 150)], fill=(0, 0, 0), width=1)
+    draw.line([(230, 150), (280, 150)], fill=(0, 0, 0), width=1)
+    thick = extract_thick_strokes(img, ink_threshold=245, thick_min_width=3)
+    assert thick[150, 40] == 0  # 左侧细线应被抑制
+    assert thick[150, 80] > 0 or thick[80, 150] > 0  # 粗边保留
+
+
+def test_propose_two_thick_rects_exact_boxes():
+    """两分离粗矩形 → 恰好 2 个贴边框。"""
+    from PIL import Image, ImageDraw
+
+    from pipeline.view_regions import locate_views_from_thick_boundaries
+
+    img = Image.new("RGB", (600, 500), (255, 255, 255))
+    draw = ImageDraw.Draw(img)
+    draw.rectangle([50, 40, 250, 200], outline=(0, 0, 0), width=5)
+    draw.rectangle([320, 260, 520, 420], outline=(0, 0, 0), width=5)
+    draw.line([(10, 10), (100, 10)], fill=(0, 0, 0), width=1)
+
+    views, notes = locate_views_from_thick_boundaries(
+        img,
+        thick_min_width=3,
+        pad=2,
+        min_side=40,
+        max_area_frac=0.5,
+        min_side_evidence=3,
+        min_ink_density=0.001,
+        box_nms_iou=0.45,
+    )
+    assert len(views) == 2, notes
+    boxes = sorted(views, key=lambda v: v["bbox"][0])
+    a, b = boxes[0]["bbox"], boxes[1]["bbox"]
+    assert abs(a[0] - 50) <= 6 and abs(a[1] - 40) <= 6
+    assert abs(a[2] - 250) <= 6 and abs(a[3] - 200) <= 6
+    assert abs(b[0] - 320) <= 6 and abs(b[1] - 260) <= 6
+    assert abs(b[2] - 520) <= 6 and abs(b[3] - 420) <= 6
+
+
+def test_filter_ghost_rejects_empty_and_nms_and_table():
+    import numpy as np
+
+    from pipeline.view_regions import filter_ghost_boxes
+
+    h, w = 400, 400
+    mask = np.zeros((h, w), dtype=np.uint8)
+    mask[100:105, 100:250] = 255
+    mask[245:250, 100:250] = 255
+    mask[100:250, 100:105] = 255
+    mask[100:250, 245:250] = 255
+    good = {"bbox": [100, 100, 250, 250], "score": 0.1}
+    ghost = {"bbox": [10, 10, 80, 80], "score": 0.9}
+    dup = {"bbox": [102, 102, 248, 248], "score": 0.05}
+    table_hit = {"bbox": [300, 300, 380, 380], "score": 0.2}
+    mask[300:305, 300:380] = 255
+    mask[375:380, 300:380] = 255
+    mask[300:380, 300:305] = 255
+    mask[300:380, 375:380] = 255
+
+    out = filter_ghost_boxes(
+        [ghost, good, dup, table_hit],
+        mask,
+        page_w=w,
+        page_h=h,
+        table_bboxes=[[290, 290, 390, 390]],
+        min_side=20,
+        max_area_frac=0.5,
+        min_side_evidence=3,
+        side_band=5,
+        side_min_pixels=5,
+        min_ink_density=0.001,
+        box_nms_iou=0.45,
+        exclude_tables=True,
+    )
+    assert len(out) == 1
+    assert out[0]["bbox"] == [100, 100, 250, 250]
+
+
+def test_view_regions_cache_fp_v6_fields():
+    from pipeline.perceive_utils import _view_regions_cache_fp
+
+    fp = _view_regions_cache_fp(
+        {
+            "propose_mode": "thick_boundary",
+            "min_side_evidence": 3,
+            "min_ink_density": 0.002,
+            "box_nms_iou": 0.45,
+            "exclude_tables": True,
+            "fallback_vlm": True,
+        }
+    )
+    assert fp["v"] == 6
+    assert fp["propose_mode"] == "thick_boundary"
+    assert fp["min_side_evidence"] == 3
+    assert "box_nms_iou" in fp

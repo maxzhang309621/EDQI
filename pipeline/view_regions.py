@@ -229,6 +229,301 @@ def tighten_view_bbox(
     )
 
 
+def _binarize_ink(gray: Any, ink_threshold: int = 245) -> Any:
+    """墨迹二值化；固定阈值若把灰底整页当成墨迹则改用相对背景阈值。"""
+    import numpy as np
+
+    arr = np.asarray(gray, dtype=np.uint8)
+    thr = int(ink_threshold)
+    ink = arr < thr
+    if float(ink.mean()) > 0.35:
+        bg = float(np.percentile(arr, 90))
+        thr = int(min(thr - 1, max(32, bg - 20)))
+        ink = arr < thr
+    return (ink.astype(np.uint8)) * 255
+
+
+def extract_thick_strokes(
+    image: Any,
+    *,
+    ink_threshold: int = 245,
+    thick_min_width: int = 3,
+) -> Any:
+    """全页粗线掩膜：OPEN 抑制细线后 CLOSE 补缝，返回 uint8 0/255。
+
+    OPEN 核过大致粗线几乎消失时，自动降核重试（适配 2px 级工程线宽）。
+    """
+    import numpy as np
+
+    gray = np.asarray(image.convert("L"), dtype=np.uint8)
+    ink = _binarize_ink(gray, ink_threshold=ink_threshold)
+    try:
+        import cv2
+    except Exception:
+        return ink
+
+    ink_px = int((ink > 0).sum())
+    if ink_px <= 0:
+        return ink
+
+    k = max(2, int(thick_min_width))
+    # 候选核：宣称线宽 → 略小 → 最小 2（保留细「粗线」）
+    open_sizes = []
+    for s in (k, k - 1 if k > 2 else 2, 2):
+        s = max(2, int(s))
+        if s not in open_sizes:
+            open_sizes.append(s)
+
+    best = ink
+    best_px = ink_px
+    for k_open in open_sizes:
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (k_open, k_open))
+        thick = cv2.morphologyEx(ink, cv2.MORPH_OPEN, kernel, iterations=1)
+        k_close = max(2, k_open)
+        close_ker = cv2.getStructuringElement(cv2.MORPH_RECT, (k_close, k_close))
+        thick = cv2.morphologyEx(thick, cv2.MORPH_CLOSE, close_ker, iterations=1)
+        px = int((thick > 0).sum())
+        # 保留足够墨迹；过强 OPEN 会把 2px 轮廓干掉
+        if px >= max(80, int(0.08 * ink_px)):
+            return thick
+        if 0 < px < best_px:
+            best, best_px = thick, px
+    return best if best_px > 0 else ink
+
+
+def propose_boxes_from_thick_boundaries(
+    thick_mask: Any,
+    *,
+    min_area: int = 200,
+    min_side: int = 32,
+    pad: int = 2,
+    min_component_area_frac: float = 0.0002,
+) -> list[dict[str, Any]]:
+    """由粗线连通域外接框生成 raw 候选（四边贴粗线外缘）。"""
+    import numpy as np
+
+    try:
+        import cv2
+    except Exception:
+        return []
+
+    mask = np.asarray(thick_mask)
+    if mask.ndim != 2 or mask.size == 0:
+        return []
+    h, w = int(mask.shape[0]), int(mask.shape[1])
+    binary = (mask > 0).astype(np.uint8) * 255
+    if int((binary > 0).sum()) < int(min_area):
+        return []
+
+    nlab, _labels, stats, _ = cv2.connectedComponentsWithStats(binary, connectivity=8)
+    page_area = float(max(1, w * h))
+    area_floor = max(float(min_area), float(min_component_area_frac) * page_area)
+    candidates: list[dict[str, Any]] = []
+    for i in range(1, nlab):
+        area = float(stats[i, cv2.CC_STAT_AREA])
+        if area < area_floor:
+            continue
+        lx = int(stats[i, cv2.CC_STAT_LEFT])
+        ly = int(stats[i, cv2.CC_STAT_TOP])
+        lw = int(stats[i, cv2.CC_STAT_WIDTH])
+        lh = int(stats[i, cv2.CC_STAT_HEIGHT])
+        if lw < int(min_side) or lh < int(min_side):
+            continue
+        bbox = _clamp_bbox(
+            [lx - int(pad), ly - int(pad), lx + lw + int(pad), ly + lh + int(pad)],
+            w,
+            h,
+        )
+        if bbox[2] - bbox[0] < int(min_side) or bbox[3] - bbox[1] < int(min_side):
+            continue
+        # score：粗线像素面积相对框面积，后续 NMS 用
+        box_area = max(1.0, _area(bbox))
+        score = float(area) / box_area
+        candidates.append({"bbox": bbox, "score": score, "ink_area": area})
+    return candidates
+
+
+def _bbox_iou(a: list[int], b: list[int]) -> float:
+    ix1 = max(a[0], b[0])
+    iy1 = max(a[1], b[1])
+    ix2 = min(a[2], b[2])
+    iy2 = min(a[3], b[3])
+    iw = max(0, ix2 - ix1)
+    ih = max(0, iy2 - iy1)
+    inter = float(iw * ih)
+    if inter <= 0:
+        return 0.0
+    union = _area(a) + _area(b) - inter
+    return inter / float(max(1e-6, union))
+
+
+def _count_side_evidence(
+    thick_mask: Any,
+    bbox: list[int],
+    *,
+    band: int = 3,
+    min_pixels: int = 8,
+) -> int:
+    """统计 bbox 四条边带上是否有足够粗线像素；返回有证据的边数 0–4。"""
+    import numpy as np
+
+    mask = np.asarray(thick_mask) > 0
+    h, w = mask.shape[:2]
+    x1, y1, x2, y2 = [int(v) for v in bbox]
+    x1 = max(0, min(w - 1, x1))
+    y1 = max(0, min(h - 1, y1))
+    x2 = max(x1 + 1, min(w, x2))
+    y2 = max(y1 + 1, min(h, y2))
+    b = max(1, int(band))
+    strips = [
+        mask[y1 : min(h, y1 + b), x1:x2],  # top
+        mask[max(0, y2 - b) : y2, x1:x2],  # bottom
+        mask[y1:y2, x1 : min(w, x1 + b)],  # left
+        mask[y1:y2, max(0, x2 - b) : x2],  # right
+    ]
+    return sum(1 for s in strips if int(s.sum()) >= int(min_pixels))
+
+
+def filter_ghost_boxes(
+    candidates: list[dict[str, Any]],
+    thick_mask: Any,
+    *,
+    page_w: int,
+    page_h: int,
+    table_bboxes: list[list[int]] | None = None,
+    min_side: int = 32,
+    max_area_frac: float = 0.35,
+    min_side_evidence: int = 3,
+    side_band: int = 3,
+    side_min_pixels: int = 8,
+    min_ink_density: float = 0.002,
+    box_nms_iou: float = 0.45,
+    exclude_tables: bool = True,
+) -> list[dict[str, Any]]:
+    """反幽灵闸门：面积 → 四边证据 → 密度 → 表冲突 → IoU-NMS。"""
+    import numpy as np
+
+    mask = np.asarray(thick_mask) > 0
+    kept: list[dict[str, Any]] = []
+    for cand in candidates or []:
+        bbox = cand.get("bbox")
+        if not bbox or len(bbox) != 4:
+            continue
+        bbox = _clamp_bbox(list(bbox), page_w, page_h)
+        if is_region_too_small(bbox, min_side=min_side):
+            continue
+        if is_region_too_large(bbox, page_w, page_h, max_area_frac=max_area_frac):
+            continue
+        sides = _count_side_evidence(
+            mask,
+            bbox,
+            band=side_band,
+            min_pixels=side_min_pixels,
+        )
+        if sides < int(min_side_evidence):
+            continue
+        x1, y1, x2, y2 = bbox
+        crop = mask[y1:y2, x1:x2]
+        dens = float(crop.sum()) / float(max(1, crop.size))
+        if dens < float(min_ink_density):
+            continue
+        if exclude_tables and table_bboxes:
+            cx = (x1 + x2) / 2.0
+            cy = (y1 + y2) / 2.0
+            drop = False
+            for tb in table_bboxes:
+                if not tb or len(tb) != 4:
+                    continue
+                tx1, ty1, tx2, ty2 = [int(v) for v in tb]
+                if tx1 <= cx <= tx2 and ty1 <= cy <= ty2:
+                    drop = True
+                    break
+                if _bbox_iou(bbox, [tx1, ty1, tx2, ty2]) >= 0.5:
+                    drop = True
+                    break
+            if drop:
+                continue
+        base_score = float(cand.get("score") or dens)
+        score = base_score * (1.0 + 0.25 * float(sides))
+        kept.append(
+            {
+                "bbox": bbox,
+                "score": score,
+                "side_evidence": sides,
+                "ink_density": dens,
+            }
+        )
+
+    kept.sort(key=lambda c: float(c.get("score") or 0.0), reverse=True)
+    selected: list[dict[str, Any]] = []
+    for cand in kept:
+        if any(
+            _bbox_iou(cand["bbox"], s["bbox"]) >= float(box_nms_iou) for s in selected
+        ):
+            continue
+        selected.append(cand)
+    return selected
+
+
+def locate_views_from_thick_boundaries(
+    image: Any,
+    *,
+    ink_threshold: int = 245,
+    thick_min_width: int = 3,
+    pad: int = 2,
+    min_side: int = 32,
+    max_area_frac: float = 0.35,
+    min_side_evidence: int = 3,
+    min_ink_density: float = 0.002,
+    box_nms_iou: float = 0.45,
+    exclude_tables: bool = True,
+    table_bboxes: list[list[int]] | None = None,
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """几何优先：粗线 → 四边界候选 → 反幽灵过滤，返回 views + notes。"""
+    notes: list[str] = []
+    page_w, page_h = image.size
+    thick = extract_thick_strokes(
+        image,
+        ink_threshold=ink_threshold,
+        thick_min_width=thick_min_width,
+    )
+    thick_px = int((thick > 0).sum()) if hasattr(thick, "sum") else 0
+    notes.append(f"thick_strokes_px={thick_px}")
+    raw = propose_boxes_from_thick_boundaries(
+        thick,
+        min_area=max(80, int(min_side) * int(min_side) // 4),
+        min_side=min_side,
+        pad=pad,
+    )
+    notes.append(f"thick_boundary_raw={len(raw)}")
+    filtered = filter_ghost_boxes(
+        raw,
+        thick,
+        page_w=page_w,
+        page_h=page_h,
+        table_bboxes=table_bboxes,
+        min_side=min_side,
+        max_area_frac=max_area_frac,
+        min_side_evidence=min_side_evidence,
+        side_band=max(2, int(thick_min_width)),
+        min_ink_density=min_ink_density,
+        box_nms_iou=box_nms_iou,
+        exclude_tables=exclude_tables,
+    )
+    notes.append(f"thick_boundary_kept={len(filtered)}")
+    views: list[dict[str, Any]] = []
+    for i, cand in enumerate(filtered):
+        views.append(
+            {
+                "bbox": list(cand["bbox"]),
+                "label": f"view#{i}",
+                "score": float(cand.get("score") or 0.0),
+                "side_evidence": int(cand.get("side_evidence") or 0),
+            }
+        )
+    return views, notes
+
+
 def _overlap_xyxy(a: list[int], b: list[int]) -> bool:
     return not (a[2] <= b[0] or b[2] <= a[0] or a[3] <= b[1] or b[3] <= a[1])
 

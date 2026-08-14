@@ -907,34 +907,18 @@ _VIEW_LOCATE_PROMPT = (
 )
 
 
-def locate_drawing_views(
-    image: Image.Image | str | Path,
-    config: dict[str, Any] | None = None,
+def _locate_drawing_views_vlm(
+    img: Image.Image,
     *,
-    allow_mock_fallback: bool = True,
-) -> tuple[list[dict[str, Any]], list[str]]:
-    """Pass0：定位零件几何视图框（含 label），供尺寸属性分区识别。
-
-    返回 (views, notes)，views 元素为 {"bbox":[x1,y1,x2,y2], "label": str}。
-    """
+    cfg: dict[str, Any],
+    vr_cfg: dict[str, Any],
+    model_cfg: dict[str, Any],
+    notes: list[str],
+) -> list[dict[str, Any]]:
+    """VLM Pass0 粗框 + 可选粗轮廓收紧（v3 兼容路径）。"""
     from pipeline.view_regions import tighten_view_bbox
 
-    cfg = config or load_config()
-    model_cfg = cfg.get("models", {}).get("qwen3_vl", {})
-    vr_cfg = (cfg.get("perception") or {}).get("view_regions") or {}
-    notes: list[str] = []
-    if isinstance(image, (str, Path)):
-        img = Image.open(resolve_path(image)).convert("RGB")
-    else:
-        img = image.convert("RGB") if image.mode != "RGB" else image
     width, height = img.size
-
-    if not model_path_ready(model_cfg):
-        notes.append("view_locate_skip=weights_not_ready")
-        if allow_mock_fallback:
-            return [], notes
-        raise FileNotFoundError(model_cfg.get("path"))
-
     model, processor = _load_vlm(model_cfg)
     max_tokens = int(model_cfg.get("max_new_tokens", 2048))
     locate_tokens = int(
@@ -948,7 +932,7 @@ def locate_drawing_views(
     if raw is None or raw == []:
         preview = (text or "").strip().replace("\n", " ")[:160]
         notes.append(f"view_locate_json_empty preview={preview!r}")
-        return [], notes
+        return []
     items = _coerce_instance_list(raw, notes=notes, tag="view_locate")
     tighten = bool(vr_cfg.get("tighten_to_ink", True))
     ink_thr = int(vr_cfg.get("ink_threshold", 245))
@@ -996,6 +980,74 @@ def locate_drawing_views(
     if tighten:
         notes.append(f"view_locate_tighten_mode={tighten_mode}")
         notes.append(f"view_locate_tighten={n_tightened}/{len(views)}")
+    return views
+
+
+def locate_drawing_views(
+    image: Image.Image | str | Path,
+    config: dict[str, Any] | None = None,
+    *,
+    allow_mock_fallback: bool = True,
+    table_bboxes: list[list[int]] | None = None,
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """定位零件几何视图框（含 label），供尺寸属性分区识别。
+
+    默认 propose_mode=thick_boundary：粗线四边界几何提案（抑幽灵）。
+    vlm_then_tighten 保留 v3：VLM Pass0 + 粗轮廓收紧。
+
+    返回 (views, notes)，views 元素为 {"bbox":[x1,y1,x2,y2], "label": str}。
+    """
+    from pipeline.view_regions import locate_views_from_thick_boundaries
+
+    cfg = config or load_config()
+    model_cfg = cfg.get("models", {}).get("qwen3_vl", {})
+    vr_cfg = (cfg.get("perception") or {}).get("view_regions") or {}
+    notes: list[str] = []
+    if isinstance(image, (str, Path)):
+        img = Image.open(resolve_path(image)).convert("RGB")
+    else:
+        img = image.convert("RGB") if image.mode != "RGB" else image
+
+    propose_mode = str(vr_cfg.get("propose_mode", "thick_boundary")).strip().lower()
+    notes.append(f"view_propose_mode={propose_mode}")
+    fallback_vlm = bool(vr_cfg.get("fallback_vlm", True))
+
+    if propose_mode in {"thick_boundary", "thick", "geometry", "geom"}:
+        views, gnotes = locate_views_from_thick_boundaries(
+            img,
+            ink_threshold=int(vr_cfg.get("ink_threshold", 245)),
+            thick_min_width=int(vr_cfg.get("thick_min_width", 3)),
+            pad=int(vr_cfg.get("tighten_pad", 2)),
+            min_side=int(vr_cfg.get("min_side", 64)),
+            max_area_frac=float(vr_cfg.get("max_area_frac", 0.35)),
+            min_side_evidence=int(vr_cfg.get("min_side_evidence", 3)),
+            min_ink_density=float(vr_cfg.get("min_ink_density", 0.002)),
+            box_nms_iou=float(vr_cfg.get("box_nms_iou", 0.45)),
+            exclude_tables=bool(vr_cfg.get("exclude_tables", True)),
+            table_bboxes=table_bboxes,
+        )
+        notes.extend(gnotes)
+        if views:
+            notes.append("view_locate_source=thick")
+            return views, notes
+        notes.append("view_locate_source=thick_empty")
+        if not fallback_vlm:
+            return [], notes
+        notes.append("view_locate_fallback=vlm")
+
+    if not model_path_ready(model_cfg):
+        notes.append("view_locate_skip=weights_not_ready")
+        if allow_mock_fallback:
+            return [], notes
+        raise FileNotFoundError(model_cfg.get("path"))
+
+    views = _locate_drawing_views_vlm(
+        img, cfg=cfg, vr_cfg=vr_cfg, model_cfg=model_cfg, notes=notes
+    )
+    if views:
+        notes.append("view_locate_source=vlm")
+    else:
+        notes.append("view_locate_source=empty")
     return views, notes
 
 

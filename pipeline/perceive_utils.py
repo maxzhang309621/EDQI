@@ -345,7 +345,7 @@ def _drop_oversized_dimension_boxes(
 
 def _view_regions_cache_fp(vr_cfg: dict[str, Any]) -> dict[str, Any]:
     return {
-        "v": 5,
+        "v": 6,
         "enabled": bool(vr_cfg.get("enabled", True)),
         "expand_ratio": float(vr_cfg.get("expand_ratio", 0.18)),
         "min_side": int(vr_cfg.get("min_side", 64)),
@@ -353,6 +353,12 @@ def _view_regions_cache_fp(vr_cfg: dict[str, Any]) -> dict[str, Any]:
         "fallback_grid": bool(vr_cfg.get("fallback_grid", True)),
         "tile_size": int(vr_cfg.get("tile_size", 1280)),
         "tile_overlap": float(vr_cfg.get("tile_overlap", 0.2)),
+        "propose_mode": str(vr_cfg.get("propose_mode", "thick_boundary")),
+        "fallback_vlm": bool(vr_cfg.get("fallback_vlm", True)),
+        "min_side_evidence": int(vr_cfg.get("min_side_evidence", 3)),
+        "min_ink_density": float(vr_cfg.get("min_ink_density", 0.002)),
+        "box_nms_iou": float(vr_cfg.get("box_nms_iou", 0.45)),
+        "exclude_tables": bool(vr_cfg.get("exclude_tables", True)),
         "tighten_to_ink": bool(vr_cfg.get("tighten_to_ink", True)),
         "tighten_mode": str(vr_cfg.get("tighten_mode", "thick_outline")),
         "thick_min_width": int(vr_cfg.get("thick_min_width", 3)),

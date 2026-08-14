@@ -26,7 +26,14 @@ perception:
     max_area_frac: 0.35
     fallback_grid: true
     locate_max_new_tokens: 512
-    # Pass0 粗框后按粗实线轮廓收紧（抑制细尺寸线/剖面线）
+    # 部件 raw 框：粗线四边界几何提案（默认）；vlm_then_tighten 为 v3 兼容
+    propose_mode: thick_boundary  # thick_boundary | vlm_then_tighten
+    fallback_vlm: true
+    min_side_evidence: 3
+    min_ink_density: 0.002
+    box_nms_iou: 0.45
+    exclude_tables: true
+    # Pass0/收紧备用：粗实线轮廓（抑制细尺寸线/剖面线）
     tighten_to_ink: true
     tighten_mode: thick_outline  # thick_outline | ink
     thick_min_width: 3
