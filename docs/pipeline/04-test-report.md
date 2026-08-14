@@ -1,25 +1,42 @@
-# 测试报告：部件粗边框识别 + 扩展收紧
+# 系统测试报告：标题栏表格定位 + 附属表分离
 
 - 日期：2026-08-14
-- 结论：**系统测试通过**
-- 循环：L1 0/3 · L2 0
+- 结果：**系统测试通过**
+- 依据：`01-architecture.md` v4.0 验收标准 T1–T6
 
-## 验收对照（01 架构 v3.0）
+## 测试项清单
 
-| 步骤 | 用例 | 结果 |
+| ID | 类型 | 验收点 | 结果 |
+|----|------|--------|------|
+| T1 | 正常 | plan 加载 `bbox_only` / aux；material/main 契约不变 | 通过 |
+| T2 | 正常 | 线网/间隙可拆出上方附属框；无附属时不硬造 aux | 通过（单测） |
+| T3 | 正常/边界 | Product 分界保留；`aux.y2 ≤ material.y1` | 通过 |
+| T4 | 正常 | Pass2 跳过 bbox_only；material above_cells / main 字段 mock 仍有值 | 通过 |
+| T5 | 正常 | aux 进入 `facts.tables` + 排除区/渲染路径 | 通过（L1 修复后） |
+| T6 | 回归 | 全量单元测试 | 通过 99 passed |
+| E1 | 入口 | `run_demo.py` mock 端到端 | 通过 |
+| B1 | 边界 | 无 Product OCR → 几何回退路径仍可调用 | 通过（既有+扩展 notes） |
+| A1 | 异常 | 非法 read_mode 回退 cell_content | 通过 |
+
+## L1 修复记录
+
+| 轮次 | 问题 | 修复 |
 |------|------|------|
-| B1 粗轮廓收紧 | `test_tighten_thick_outline_ignores_thin_peripheral_lines` | PASS |
-| B1 回退全墨迹 | `test_tighten_bbox_to_ink` | PASS |
-| B3 扩展收紧 | `test_expand_ratio_tighter_default_behavior`（0.18 < 0.28） | PASS |
-| B4 回归 | 全量 pytest（忽略无关 m4） | **91 passed** |
-| 入口 | `run_demo.py` | passed=True |
+| 1 | `aux_table` 未进 `ENTITY_FACTS_MAP`，落入顶层 `facts.aux_table` 而非 `tables` | 映射 + `build_facts` 对 `aux_table*` / parse_kind=table 兜底 |
 
-## 配置检查
+## 命令与结果
 
-- `expand_ratio: 0.18`
-- `tighten_mode: thick_outline`
-- `thick_min_width: 3`
+```
+python -m pytest tests/ --ignore=tests/test_m4_hardening.py -q
+→ 99 passed
 
-## 备注
+python run_demo.py
+→ passed=True；facts.tables 含 aux / material / main
+```
 
-清缓存后再跑业务图：`Remove-Item -Recurse -Force work_dirs\cache\perception, work_dirs\cache\tiles`
+（`test_m4_hardening.py` 既有 `_bootstrap` 导入失败，与本轮无关。）
+
+## 稳定节点
+
+- 提交：`d76c6cd`（L1 修复）/ `c9a8118`（功能）
+- tag：`pipeline-pass-2026-08-14-title-block-tables`
