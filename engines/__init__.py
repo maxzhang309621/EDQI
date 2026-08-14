@@ -37,6 +37,7 @@ ENTITY_FACTS_MAP: dict[str, dict[str, Any]] = {
     "info_table": {"key": "tables", "many": True},
     "material_table": {"key": "tables", "many": True},
     "main_table": {"key": "tables", "many": True},
+    "aux_table": {"key": "tables", "many": True},
 }
 
 

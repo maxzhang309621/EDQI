@@ -142,9 +142,11 @@ def test_mock_split_tables_to_facts():
     plan = [e for e in build_drawing_parse_plan(cfg) if e.get("parse_kind") == "table"]
     payload = mock_perceive(plan, {"width": 800, "height": 600, "drawing_id": "parse_demo"})
     facts = build_facts(payload, {"width": 800, "height": 600, "drawing_id": "parse_demo"})
-    assert len(facts["tables"]) == 2
+    assert len(facts["tables"]) == 3
     by_section = {t.get("section"): t for t in facts["tables"]}
-    assert "material" in by_section and "main" in by_section
+    assert "aux" in by_section and "material" in by_section and "main" in by_section
+    assert by_section["aux"].get("read_mode") == "bbox_only"
+    assert by_section["aux"].get("bbox")
     mat = by_section["material"]
     assert isinstance(mat.get("volume"), list)
     assert mat["volume"] == ["7295.9"]

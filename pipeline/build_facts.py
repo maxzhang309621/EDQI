@@ -67,7 +67,16 @@ def build_facts(
     counters: dict[str, int] = {}
     for inst in instances:
         eid = inst.get("entity_id", "unknown")
-        mapping = ENTITY_FACTS_MAP.get(eid, {"key": eid, "many": False})
+        mapping = ENTITY_FACTS_MAP.get(eid)
+        if mapping is None and str(eid).startswith("aux_table"):
+            mapping = {"key": "tables", "many": True}
+        if mapping is None and (
+            str(inst.get("parse_kind") or "").lower() == "table"
+            or str(eid).endswith("_table")
+        ):
+            mapping = {"key": "tables", "many": True}
+        if mapping is None:
+            mapping = {"key": eid, "many": False}
         key = mapping["key"]
         many = mapping["many"] or inst.get("cardinality") == "many"
 

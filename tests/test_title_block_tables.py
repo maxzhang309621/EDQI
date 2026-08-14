@@ -149,3 +149,37 @@ def test_is_bbox_only_table():
         {"entity_id": "material_table", "read_mode": "above_cells", "section": "material"},
         {"entity_id": "material_table"},
     )
+
+
+def test_aux_table_lands_in_facts_tables():
+    from pipeline.build_facts import build_facts
+
+    payload = {
+        "backend": "mock",
+        "instances": [
+            {
+                "entity_id": "aux_table",
+                "instance_id": "aux_table#0",
+                "bbox": [10, 10, 100, 40],
+                "fields": {"section": "aux", "read_mode": "bbox_only", "pairs": []},
+            },
+            {
+                "entity_id": "aux_table_1",
+                "instance_id": "aux_table#1",
+                "bbox": [10, 45, 100, 70],
+                "fields": {"section": "aux", "read_mode": "bbox_only", "pairs": []},
+                "parse_kind": "table",
+            },
+            {
+                "entity_id": "material_table",
+                "instance_id": "material_table#0",
+                "bbox": [10, 80, 100, 120],
+                "fields": {"section": "material", "read_mode": "above_cells", "pairs": []},
+            },
+        ],
+    }
+    facts = build_facts(payload, {"width": 200, "height": 200, "drawing_id": "aux_t"}, validate=False)
+    sections = [t.get("section") for t in facts["tables"]]
+    assert sections.count("aux") == 2
+    assert "material" in sections
+    assert "aux_table" not in facts
