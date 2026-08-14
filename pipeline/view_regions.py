@@ -77,6 +77,158 @@ def tighten_bbox_to_ink(
     return tight
 
 
+def tighten_bbox_to_thick_outline(
+    image: Any,
+    bbox: list[int],
+    *,
+    ink_threshold: int = 245,
+    pad: int = 2,
+    thick_min_width: int = 3,
+    min_ink_pixels: int = 40,
+    max_shrink_frac: float = 0.85,
+    min_component_area_frac: float = 0.002,
+) -> list[int]:
+    """按粗轮廓线收紧部件框：形态学 OPEN 抑制细线后取粗笔画外接框。
+
+    工程图零件边框多为较粗实线；尺寸线/剖面线较细。OPEN(核≈粗线宽)
+    可保留粗笔画。失败时回退 ``tighten_bbox_to_ink``。
+    """
+    import numpy as np
+
+    try:
+        import cv2
+    except Exception:
+        return tighten_bbox_to_ink(
+            image,
+            bbox,
+            ink_threshold=ink_threshold,
+            pad=pad,
+            min_ink_pixels=min_ink_pixels,
+            max_shrink_frac=max_shrink_frac,
+        )
+
+    page_w, page_h = image.size
+    x1, y1, x2, y2 = _clamp_bbox(list(bbox), page_w, page_h)
+    bw, bh = x2 - x1, y2 - y1
+    if bw < 16 or bh < 16:
+        return [x1, y1, x2, y2]
+
+    gray = np.asarray(image.crop((x1, y1, x2, y2)).convert("L"), dtype=np.uint8)
+    ink = ((gray < int(ink_threshold)).astype(np.uint8)) * 255
+    if int((ink > 0).sum()) < int(min_ink_pixels):
+        return [x1, y1, x2, y2]
+
+    k = max(2, int(thick_min_width))
+    # 奇数核更稳；略小于宣称线宽以免打断略细的粗线
+    k_open = k if k % 2 == 1 else k - 1
+    k_open = max(3, k_open)
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (k_open, k_open))
+    thick = cv2.morphologyEx(ink, cv2.MORPH_OPEN, kernel, iterations=1)
+    # 补缝：粗轮廓可能因扫描断裂
+    k_close = max(3, k_open)
+    close_ker = cv2.getStructuringElement(cv2.MORPH_RECT, (k_close, k_close))
+    thick = cv2.morphologyEx(thick, cv2.MORPH_CLOSE, close_ker, iterations=1)
+
+    if int((thick > 0).sum()) < int(min_ink_pixels):
+        return tighten_bbox_to_ink(
+            image,
+            bbox,
+            ink_threshold=ink_threshold,
+            pad=pad,
+            min_ink_pixels=min_ink_pixels,
+            max_shrink_frac=max_shrink_frac,
+        )
+
+    nlab, labels, stats, _ = cv2.connectedComponentsWithStats(thick, connectivity=8)
+    if nlab <= 1:
+        return tighten_bbox_to_ink(
+            image,
+            bbox,
+            ink_threshold=ink_threshold,
+            pad=pad,
+            min_ink_pixels=min_ink_pixels,
+            max_shrink_frac=max_shrink_frac,
+        )
+
+    crop_area = float(max(1, bw * bh))
+    min_area = max(float(min_ink_pixels), float(min_component_area_frac) * crop_area)
+    # 合并所有足够大的粗线连通域外接框（零件轮廓常非单连通）
+    ux1, uy1, ux2, uy2 = bw, bh, 0, 0
+    kept = 0
+    for i in range(1, nlab):
+        area = float(stats[i, cv2.CC_STAT_AREA])
+        if area < min_area:
+            continue
+        lx = int(stats[i, cv2.CC_STAT_LEFT])
+        ly = int(stats[i, cv2.CC_STAT_TOP])
+        lw = int(stats[i, cv2.CC_STAT_WIDTH])
+        lh = int(stats[i, cv2.CC_STAT_HEIGHT])
+        ux1 = min(ux1, lx)
+        uy1 = min(uy1, ly)
+        ux2 = max(ux2, lx + lw)
+        uy2 = max(uy2, ly + lh)
+        kept += 1
+
+    if kept == 0 or ux2 <= ux1 or uy2 <= uy1:
+        return tighten_bbox_to_ink(
+            image,
+            bbox,
+            ink_threshold=ink_threshold,
+            pad=pad,
+            min_ink_pixels=min_ink_pixels,
+            max_shrink_frac=max_shrink_frac,
+        )
+
+    tight = _clamp_bbox(
+        [
+            x1 + ux1 - int(pad),
+            y1 + uy1 - int(pad),
+            x1 + ux2 + int(pad),
+            y1 + uy2 + int(pad),
+        ],
+        page_w,
+        page_h,
+    )
+    if _area(tight) < (1.0 - float(max_shrink_frac)) * _area([x1, y1, x2, y2]):
+        return [x1, y1, x2, y2]
+    if tight[2] - tight[0] < 8 or tight[3] - tight[1] < 8:
+        return [x1, y1, x2, y2]
+    return tight
+
+
+def tighten_view_bbox(
+    image: Any,
+    bbox: list[int],
+    *,
+    mode: str = "thick_outline",
+    ink_threshold: int = 245,
+    pad: int = 2,
+    thick_min_width: int = 3,
+    min_ink_pixels: int = 40,
+    max_shrink_frac: float = 0.85,
+) -> list[int]:
+    """部件框收紧入口：thick_outline（默认）或 ink（全墨迹）。"""
+    m = str(mode or "thick_outline").strip().lower()
+    if m in {"ink", "all_ink", "full_ink"}:
+        return tighten_bbox_to_ink(
+            image,
+            bbox,
+            ink_threshold=ink_threshold,
+            pad=pad,
+            min_ink_pixels=min_ink_pixels,
+            max_shrink_frac=max_shrink_frac,
+        )
+    return tighten_bbox_to_thick_outline(
+        image,
+        bbox,
+        ink_threshold=ink_threshold,
+        pad=pad,
+        thick_min_width=thick_min_width,
+        min_ink_pixels=min_ink_pixels,
+        max_shrink_frac=max_shrink_frac,
+    )
+
+
 def _overlap_xyxy(a: list[int], b: list[int]) -> bool:
     return not (a[2] <= b[0] or b[2] <= a[0] or a[3] <= b[1] or b[3] <= a[1])
 

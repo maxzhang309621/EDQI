@@ -345,15 +345,17 @@ def _drop_oversized_dimension_boxes(
 
 def _view_regions_cache_fp(vr_cfg: dict[str, Any]) -> dict[str, Any]:
     return {
-        "v": 4,
+        "v": 5,
         "enabled": bool(vr_cfg.get("enabled", True)),
-        "expand_ratio": float(vr_cfg.get("expand_ratio", 0.2)),
+        "expand_ratio": float(vr_cfg.get("expand_ratio", 0.18)),
         "min_side": int(vr_cfg.get("min_side", 64)),
         "max_area_frac": float(vr_cfg.get("max_area_frac", 0.35)),
         "fallback_grid": bool(vr_cfg.get("fallback_grid", True)),
         "tile_size": int(vr_cfg.get("tile_size", 1280)),
         "tile_overlap": float(vr_cfg.get("tile_overlap", 0.2)),
         "tighten_to_ink": bool(vr_cfg.get("tighten_to_ink", True)),
+        "tighten_mode": str(vr_cfg.get("tighten_mode", "thick_outline")),
+        "thick_min_width": int(vr_cfg.get("thick_min_width", 3)),
         "ink_threshold": int(vr_cfg.get("ink_threshold", 245)),
         "tighten_pad": int(vr_cfg.get("tighten_pad", 2)),
         "fill_uncovered_grid": bool(vr_cfg.get("fill_uncovered_grid", True)),

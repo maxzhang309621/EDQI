@@ -896,8 +896,8 @@ def _normalize_instances(
 _VIEW_LOCATE_PROMPT = (
     "你是工程图纸视图定位模块。请标出图中每个零件几何视图的外接框"
     "（主视、侧视、剖视、DETAIL 局部放大、单独摆放的零件视图等）。\n"
-    "bbox 必须紧贴零件几何轮廓外缘：上下左右贴着可见轮廓线，"
-    "不要为尺寸标注、公差、指引线、空白留白留边距。\n"
+    "bbox 必须紧贴零件粗实线轮廓（object line / 可见粗边框）的外缘："
+    "上下左右贴着较粗的轮廓线，不要为细尺寸线、剖面线、中心线、公差、指引线、空白留边距。\n"
     "禁止框选：标题栏、物料表、图框表格、General data/总注文字块、单独的尺寸数字与公差。\n"
     "每个独立视图一个紧致 bbox；禁止把多个视图合成一个大框；禁止覆盖大片空白。\n"
     "为每个视图给出短 label（如 front / side / top / section / DETAIL_M / iso）。\n"
@@ -917,7 +917,7 @@ def locate_drawing_views(
 
     返回 (views, notes)，views 元素为 {"bbox":[x1,y1,x2,y2], "label": str}。
     """
-    from pipeline.view_regions import tighten_bbox_to_ink
+    from pipeline.view_regions import tighten_view_bbox
 
     cfg = config or load_config()
     model_cfg = cfg.get("models", {}).get("qwen3_vl", {})
@@ -953,6 +953,8 @@ def locate_drawing_views(
     tighten = bool(vr_cfg.get("tighten_to_ink", True))
     ink_thr = int(vr_cfg.get("ink_threshold", 245))
     tight_pad = int(vr_cfg.get("tighten_pad", 2))
+    tighten_mode = str(vr_cfg.get("tighten_mode", "thick_outline"))
+    thick_w = int(vr_cfg.get("thick_min_width", 3))
     views: list[dict[str, Any]] = []
     n_tightened = 0
     for idx, item in enumerate(items):
@@ -972,11 +974,13 @@ def locate_drawing_views(
             notes.append("view_locate_drop_near_fullpage")
             continue
         if tighten:
-            tight = tighten_bbox_to_ink(
+            tight = tighten_view_bbox(
                 img,
                 bbox,
+                mode=tighten_mode,
                 ink_threshold=ink_thr,
                 pad=tight_pad,
+                thick_min_width=thick_w,
             )
             if tight != bbox:
                 n_tightened += 1
@@ -990,6 +994,7 @@ def locate_drawing_views(
         views.append({"bbox": bbox, "label": label})
     notes.append(f"view_locate_raw={len(views)}")
     if tighten:
+        notes.append(f"view_locate_tighten_mode={tighten_mode}")
         notes.append(f"view_locate_tighten={n_tightened}/{len(views)}")
     return views, notes
 

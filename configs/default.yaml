@@ -20,14 +20,16 @@ perception:
   # 部件分区：先定位部件再识别尺寸属性（失败回退网格）
   view_regions:
     enabled: true
-    # 略增大外扩，覆盖部件周围尺寸（旧网格是整页覆盖）
-    expand_ratio: 0.28
+    # 扩展框收紧：仍覆盖近旁尺寸，减少部件区互相吞并
+    expand_ratio: 0.18
     min_side: 64
     max_area_frac: 0.35
     fallback_grid: true
     locate_max_new_tokens: 512
-    # Pass0 粗框后按墨迹收紧到零件轮廓（原始框贴边）
+    # Pass0 粗框后按粗实线轮廓收紧（抑制细尺寸线/剖面线）
     tighten_to_ink: true
+    tighten_mode: thick_outline  # thick_outline | ink
+    thick_min_width: 3
     ink_threshold: 245
     tighten_pad: 2
     # 部件区内再按 tile_size 切分（对齐架构前 ≤1280 窗口）

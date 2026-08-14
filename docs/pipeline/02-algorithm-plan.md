@@ -1,58 +1,42 @@
-# 算法方案：尺寸检测准确率 + 倾斜框
+# 算法方案：部件粗边框识别 + 扩展收紧
 
-依据：`docs/pipeline/01-architecture.md` v2.0（已确认）
+依据：`docs/pipeline/01-architecture.md` v3.0（已确认）
 
-## 步骤 A1：OBB 精修
+## 步骤 B1：粗轮廓收紧
 
-- 选定算法：框内二值墨迹 →（可选）最大连通域 → **OpenCV `minAreaRect`** → 四点 `boxPoints`
-- 选型理由：工程图线划清晰；不必另训 RRPN；cv2 5.x 已在环境中可用
-- 候选：1. minAreaRect（首选）2. 仅 ink AABB 收紧（退化）3. VLM 直接出四点（不稳，备选）
-- 参考资料：[R2CNN](https://arxiv.org/pdf/1706.09579)（倾斜框动机）；OpenCV `minAreaRect` 文档
-- 接口：`(image, bbox_xyxy) → {bbox, quad, angle}`；失败则退回原 AABB
-- 依赖：`opencv-python` / 现有 `cv2`
+- 选定算法：二值墨迹 → **形态学 OPEN（核≈粗线宽）保留粗笔画** → CLOSE 补缝 → 显著连通域并集的轴对齐外接框；失败则回退现有 `tighten_bbox_to_ink`
+- 选型理由：CAD/线稿中粗轮廓与细标注线宽可分；OpenCV 已依赖；无需再训检测器
+- 候选：1. OPEN 线宽筛选（首选）2. 形态学梯度仅边带 3. 仅全墨迹 AABB（退化）
+- 参考资料：[OpenCV Morphological Operations](https://pyimagesearch.com/2021/04/28/opencv-morphological-operations/)；[Contour Features / boundingRect](https://docs.opencv.org/4.x/dd/d49/tutorial_py_contour_features.html)
+- 接口：`tighten_bbox_to_thick_outline(image, bbox, *, thick_min_width, ink_threshold, pad) → bbox`
+- 依赖：opencv-python-headless、numpy
 
-## 步骤 A2：旋转 IoU + NMS
+## 步骤 B2：Pass0 提示 + 接入
 
-- 选定算法：**多边形裁剪求交面积的 Skew-IoU** + prefer_smaller NMS（同 R2CNN Inclined-NMS 思路）
-- 选型理由：邻接斜字 AABB-IoU 虚高；旋转 IoU 才能正确保留；纯几何可单测
-- 参考资料：[RRPN Skew IoU](https://arxiv.org/pdf/1703.01086)；[R2CNN Inclined NMS](https://arxiv.org/pdf/1706.09579)
-- 接口：`iou_quad(q1,q2)`；`nms_instances(..., use_quad=True, prefer_smaller=True)`
-- 依赖：numpy；可用 `shapely` 若已装，否则用 cv2.intersectConvexConvex / 自实现
+- 选定算法：强化 `_VIEW_LOCATE_PROMPT`（强调粗实线/object line）；`locate_drawing_views` 按 `tighten_mode=thick_outline` 调用 B1
+- 接口：配置 `perception.view_regions.tighten_mode`
 
-## 步骤 A3：旋转裁剪 Pass2
+## 步骤 B3：扩展收紧
 
-- 选定算法：按 `angle`/`quad` **仿射拉正**到水平再送 VLM（扩展既有 deskew）
-- 选型理由：减少邻字进入 crop；与现有 orientation retry 兼容
-- 接口：`warp_quad_crop(image, quad, pad) → PIL.Image`
-- 依赖：cv2.warpAffine / getPerspectiveTransform
+- 选定算法：默认 `expand_ratio: 0.28 → 0.18`（约收紧 35% 外扩量）
+- 理由：用户明确要求扩展框收紧；补扫网格仍在
 
-## 步骤 A4：准确率过滤
+## 步骤 B4：测试与指纹
 
-- 选定算法：
-  1. OBB-NMS（A2）
-  2. 规范化 `text` 后，同 parent 内完全相同 text + 中心距过近 → 合并
-  3. 可配置丢弃「弱结果」（无数字且无 dim_kind）
-- 选型理由：多尺度/多 tile 主因是重复而非漏检（用户称已检出大量目标）
-- 接口：`filter_dimension_accuracy(instances, cfg) → instances`
-
-## 步骤 A5：渲染集成
-
-- 选定算法：PIL `polygon` 画 `quad`；无 quad 时回退矩形
-- 依赖：Pillow
+- 单测：粗框+细线噪声场景；expand 比例；cache fp 字段
+- 指纹：`_view_regions_cache_fp` 增加 `tighten_mode` / `thick_min_width`
 
 ## 候选尝试记录
 
 | 步骤 | 候选算法 | 状态 | 失败原因 |
 |------|----------|------|----------|
-| A1 | minAreaRect | 采用 | — |
-| A1 | VLM 直接四点 | 未试 | 优先后处理稳妥 |
-| A2 | AABB-NMS only | 否决（主路径） | 斜字误杀邻框 |
-| A2 | Skew-IoU NMS | 采用 | — |
+| B1 | OPEN 粗线筛选 | 采用 | — |
+| B1 | 仅全墨迹 | 回退路径 | 会被细线撑大 |
 
 ## 任务分配
 
 | 任务 ID | 实现内容 | 关联步骤 |
 |---------|----------|----------|
-| T1 | `pipeline/oriented_box.py`：ink→OBB、quad IoU、warp crop | A1–A3 |
-| T2 | NMS/准确率过滤接入 `perceive_utils` + Pass2 用 warp | A2–A4 |
-| T3 | `render_report` 画多边形；config；单测；缓存指纹 | A5 |
+| T1 | `view_regions.tighten_bbox_to_thick_outline` + 单测 | B1 |
+| T2 | `locate_drawing_views` + prompt + config expand | B2–B3 |
+| T3 | 缓存指纹 + 冒烟 | B4 |

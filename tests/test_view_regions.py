@@ -38,6 +38,39 @@ def test_tighten_bbox_to_ink():
     assert tight[2] >= 118 and tight[3] >= 118
 
 
+def test_tighten_thick_outline_ignores_thin_peripheral_lines():
+    """粗矩形边框 + 框外细线：粗轮廓收紧应贴粗框，不被细线撑大。"""
+    from PIL import Image, ImageDraw
+
+    from pipeline.view_regions import tighten_bbox_to_ink, tighten_bbox_to_thick_outline
+
+    img = Image.new("RGB", (300, 300), (255, 255, 255))
+    draw = ImageDraw.Draw(img)
+    # 粗轮廓（约 5px）
+    draw.rectangle([100, 100, 200, 200], outline=(0, 0, 0), width=5)
+    # 外围细尺寸线（1px），会撑大全墨迹框
+    draw.line([(60, 150), (90, 150)], fill=(0, 0, 0), width=1)
+    draw.line([(210, 150), (250, 150)], fill=(0, 0, 0), width=1)
+    loose = [40, 40, 260, 260]
+    thick = tighten_bbox_to_thick_outline(
+        img, loose, ink_threshold=245, pad=2, thick_min_width=3
+    )
+    ink = tighten_bbox_to_ink(img, loose, ink_threshold=245, pad=2)
+    # 粗轮廓结果应明显小于含细线的全墨迹框
+    thick_w = thick[2] - thick[0]
+    ink_w = ink[2] - ink[0]
+    assert thick_w < ink_w - 10
+    assert thick[0] >= 95 and thick[1] >= 95
+    assert thick[2] <= 205 and thick[3] <= 205
+
+
+def test_expand_ratio_tighter_default_behavior():
+    loose = expand_view_bbox([100, 100, 200, 200], 1000, 1000, expand_ratio=0.28)
+    tight = expand_view_bbox([100, 100, 200, 200], 1000, 1000, expand_ratio=0.18)
+    assert tight[0] > loose[0] and tight[1] > loose[1]
+    assert tight[2] < loose[2] and tight[3] < loose[3]
+
+
 def test_shrink_drops_center_in_table():
     region = [1100, 1100, 1300, 1200]
     tables = [[1000, 1050, 2000, 1400]]
