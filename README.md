@@ -102,16 +102,25 @@ EDQI/
 
 在 [configs/default.yaml](configs/default.yaml) 中已预留路径：
 
-| 用途 | 配置键 | 本地目录 | HF |
-|------|--------|----------|-----|
+| 用途 | 配置键 | 本地目录 | HF / ModelScope |
+|------|--------|----------|-----------------|
 | 规则拆解 | `models.qwen3_text` | `models/Qwen3-8B` | `Qwen/Qwen3-8B` |
-| 主路径 VLM | `models.qwen3_vl` | `models/Qwen3-VL-8B-Instruct` | `Qwen/Qwen3-VL-8B-Instruct` |
+| 主路径 VLM | `models.qwen3_vl` | `models/Qwen3-VL-30B-A3B-Instruct` | `Qwen/Qwen3-VL-30B-A3B-Instruct` |
 | 备选定位 | `models.locateanything` | `models/LocateAnything-3B` | `nvidia/LocateAnything-3B` |
+
+主路径 VLM 为 **Qwen3-VL-30B-A3B-Instruct**（MoE，约 30B 总参 / 3B 激活）：
+
+- HF：https://huggingface.co/Qwen/Qwen3-VL-30B-A3B-Instruct
+- ModelScope：https://modelscope.cn/models/Qwen/Qwen3-VL-30B-A3B-Instruct
+- 显存紧可用 FP8：`Qwen/Qwen3-VL-30B-A3B-Instruct-FP8`（改 `path`/`hf_id` 后同样用下方脚本下载）
 
 ```bash
 pip install "transformers>=4.57.0" torch accelerate qwen-vl-utils huggingface_hub
+# 国内也可: pip install modelscope
 
 python tools/download_models.py qwen3_vl
+# 国内镜像:
+# python tools/download_models.py qwen3_vl --source modelscope
 python tools/download_models.py qwen3_text
 python tools/download_models.py locateanything
 # 或一次性: python tools/download_models.py all

@@ -4,9 +4,12 @@
 #   python tools/download_models.py qwen3_text
 #   -> models/Qwen3-8B/
 #
-# Qwen3-VL-8B-Instruct（主路径感知）:
+# Qwen3-VL-30B-A3B-Instruct（主路径感知，MoE）:
+#   HF: https://huggingface.co/Qwen/Qwen3-VL-30B-A3B-Instruct
+#   ModelScope: https://modelscope.cn/models/Qwen/Qwen3-VL-30B-A3B-Instruct
 #   python tools/download_models.py qwen3_vl
-#   -> models/Qwen3-VL-8B-Instruct/
+#   -> models/Qwen3-VL-30B-A3B-Instruct/
+#   显存紧可改配置为 Qwen3-VL-30B-A3B-Instruct-FP8 再下载
 #
 # LocateAnything-3B（备选定位）:
 #   python tools/download_models.py locateanything

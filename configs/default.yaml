@@ -99,11 +99,12 @@ models:
     enable_thinking: false
     max_new_tokens: 2048
 
-  # 主路径 VLM：定位 + 字段解析
+  # 主路径 VLM：定位 + 字段解析（MoE：约 30B 总参 / 3B 激活）
   qwen3_vl:
-    path: models/Qwen3-VL-8B-Instruct
-    hf_id: Qwen/Qwen3-VL-8B-Instruct
-    # 更小: Qwen/Qwen3-VL-2B-Instruct
+    path: models/Qwen3-VL-30B-A3B-Instruct
+    hf_id: Qwen/Qwen3-VL-30B-A3B-Instruct
+    # 显存紧可用 FP8: Qwen/Qwen3-VL-30B-A3B-Instruct-FP8
+    # 更小: Qwen/Qwen3-VL-8B-Instruct / Qwen/Qwen3-VL-2B-Instruct
     device: auto
     dtype: auto
     max_new_tokens: 2048
