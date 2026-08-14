@@ -39,6 +39,11 @@ perception:
     fill_uncovered_grid: true
     # 默认关闭：半页融框过滤曾误删有效尺寸；改由 prefer_smaller NMS 处理
     drop_oversized_dims: false
+  # 标题栏多表：物料上方附属表分离（只定位，不识读字段）
+  title_block_tables:
+    aux_split_enabled: true
+    search_up_pad: 80
+    ink_threshold: 245
   # 调试阶段关闭：数字重叠 OCR 自动切换 / 双后端合并
   auto_number_overlap_backend: false
   # 尺寸 VLM：大图小字自适应放大 + 多尺度 Pass1

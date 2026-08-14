@@ -60,21 +60,31 @@ def _normalize_table_block(block: dict[str, Any]) -> dict[str, Any] | None:
     if not bool(block.get("enabled", True)):
         return None
     read_mode = str(block.get("read_mode") or "cell_content").strip().lower()
-    if read_mode not in {"cell_content", "above_cells"}:
+    if read_mode not in {"cell_content", "above_cells", "bbox_only"}:
         read_mode = "cell_content"
     value_as_array = bool(block.get("value_as_array", read_mode == "above_cells"))
     ocr_enhance = block.get("ocr_enhance")
     if ocr_enhance is not None and not isinstance(ocr_enhance, dict):
         ocr_enhance = None
+    section = str(block.get("section") or block.get("entity_id") or "table")
+    # aux / bbox_only：默认无字段清单，避免误走 Pass2 识读
+    raw_fields = block.get("fields")
+    if read_mode == "bbox_only" or section == "aux":
+        fields = _field_list(raw_fields) if isinstance(raw_fields, list) and raw_fields else []
+        read_mode = "bbox_only"
+        if section in {"table", ""}:
+            section = "aux"
+    else:
+        fields = _field_list(raw_fields)
     ent = {
         "entity_id": str(block.get("entity_id") or "info_table"),
         "locate_query": str(
             block.get("locate_query") or "图纸中的表格（参数表/明细表/数据表等）"
         ),
         "cardinality": str(block.get("cardinality") or "many"),
-        "fields": _field_list(block.get("fields")),
+        "fields": fields,
         "parse_kind": "table",
-        "section": str(block.get("section") or block.get("entity_id") or "table"),
+        "section": section,
         "read_mode": read_mode,
         "value_as_array": value_as_array,
         "extract_all_pairs": bool(block.get("extract_all_pairs", False)),

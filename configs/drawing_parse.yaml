@@ -77,13 +77,30 @@ objects:
 
 # ---------- 表格：列表形式，物料表 + 主表分部解析 ----------
 tables:
+  # ----- 物料表上方附属表（可选多张；只定位整表框，暂不识读字段）-----
+  - enabled: true
+    entity_id: aux_table
+    section: aux
+    locate_query: >-
+      图纸右下图框内、物料表（Article/Material/Volume 等）之上的其它独立表格
+      （如修订记录表、备注表、其它参数小表）；须与 material_table / main_table 分开定位，
+      禁止并入物料表；本实体只输出整表 bbox，不要拆单元格
+    cardinality: many
+    crop_expand: 0.0
+    max_new_tokens: 256
+    extract_all_pairs: false
+    read_mode: bbox_only
+    value_as_array: false
+    fields: []
+
   # ----- 上方：物料表 -----
   - enabled: true
     entity_id: material_table
     section: material
     locate_query: >-
       图纸右下图框内、Product 字段行以上的物料/材料参数小表
-      （含 Article no.、Material designation、Volume、Surface、Weight/Mass 等；下界止于 Product 行上沿）
+      （含 Article no.、Material designation、Volume、Surface、Weight/Mass 等；下界止于 Product 行上沿）；
+      若其上方还有其它表格，不要框进去，留给 aux_table
     cardinality: one
     crop_expand: 0.05
     max_new_tokens: 3072

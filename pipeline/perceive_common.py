@@ -484,6 +484,9 @@ def mock_perceive(plan: list[dict[str, Any]], meta: dict[str, Any]) -> dict[str,
                     "tolerance_1": "ISO 8015",
                     "tolerance_2": "2768-H",
                 }
+            elif eid == "aux_table" or ent.get("section") == "aux" or str(ent.get("read_mode") or "") == "bbox_only":
+                bbox = [int(w * 0.62), int(h * 0.62), int(w * 0.97), int(h * 0.68)]
+                defaults = {}
             else:
                 defaults = {
                     "article_no": "21940",
@@ -498,23 +501,37 @@ def mock_perceive(plan: list[dict[str, Any]], meta: dict[str, Any]) -> dict[str,
                 f["name"]: defaults.get(f["name"])
                 for f in ent.get("fields", [])
             }
-            if bool(ent.get("value_as_array")):
+            if str(ent.get("read_mode") or "") == "bbox_only" or ent.get("section") == "aux":
+                fields = {"section": "aux", "read_mode": "bbox_only", "pairs": []}
+            elif bool(ent.get("value_as_array")):
                 for k, v in list(fields.items()):
                     if v is None:
                         continue
                     if not isinstance(v, list):
                         fields[k] = [str(v)]
-            if bool(ent.get("extract_all_pairs", False)):
-                named = {str(f["name"]).lower() for f in ent.get("fields", [])}
-                extra = [
-                    {"name": "MATERIAL", "content": "Steel"},
-                    {"name": "SCALE", "content": "1:1"},
-                ]
-                fields["pairs"] = [p for p in extra if p["name"].lower() not in named]
+                if bool(ent.get("extract_all_pairs", False)):
+                    named = {str(f["name"]).lower() for f in ent.get("fields", [])}
+                    extra = [
+                        {"name": "MATERIAL", "content": "Steel"},
+                        {"name": "SCALE", "content": "1:1"},
+                    ]
+                    fields["pairs"] = [p for p in extra if p["name"].lower() not in named]
+                else:
+                    fields["pairs"] = []
+                fields["section"] = ent.get("section")
+                fields["read_mode"] = ent.get("read_mode")
             else:
-                fields["pairs"] = []
-            fields["section"] = ent.get("section")
-            fields["read_mode"] = ent.get("read_mode")
+                if bool(ent.get("extract_all_pairs", False)):
+                    named = {str(f["name"]).lower() for f in ent.get("fields", [])}
+                    extra = [
+                        {"name": "MATERIAL", "content": "Steel"},
+                        {"name": "SCALE", "content": "1:1"},
+                    ]
+                    fields["pairs"] = [p for p in extra if p["name"].lower() not in named]
+                else:
+                    fields["pairs"] = []
+                fields["section"] = ent.get("section")
+                fields["read_mode"] = ent.get("read_mode")
             raw = f"mock {eid} section={ent.get('section')}"
         else:
             y0 = 40 + i * 80

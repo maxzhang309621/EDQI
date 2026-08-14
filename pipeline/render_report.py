@@ -231,6 +231,9 @@ def _table_box_style(
     elif section == "main" or "main_table" in eid:
         color = tuple(colors.get("table_main", [59, 130, 246]))
         name = "main_table"
+    elif section == "aux" or "aux_table" in eid:
+        color = tuple(colors.get("table_other", [168, 85, 247]))
+        name = str(row.get("label") or row.get("instance_id") or "aux_table")
     else:
         color = tuple(colors.get("table_other", [168, 85, 247]))
         name = str(row.get("label") or row.get("instance_id") or "table")

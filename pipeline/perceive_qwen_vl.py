@@ -28,6 +28,10 @@ from pipeline.table_layout_ocr import (
     apply_product_split_to_boxes,
     extract_fields_above_labels,
 )
+from pipeline.title_block_tables import (
+    enforce_aux_above_material,
+    separate_aux_tables,
+)
 from pipeline.text_angle import normalize_text_angle, text_angle_from_bbox
 
 _VLM = None
@@ -168,25 +172,76 @@ def refine_material_main_boxes(
     page_w: int,
     page_h: int,
     plan: list[dict[str, Any]] | None = None,
+    config: dict[str, Any] | None = None,
 ) -> tuple[list[dict[str, Any]], list[str]]:
-    """优先 OCR 定位 Product 行硬分界；失败则回退几何硬分界。"""
+    """优先 OCR 定位 Product 行硬分界；失败则回退几何硬分界；再拆分物料上方附属表。"""
     plan = plan or []
     notes: list[str] = []
     split_boxes, split_notes = apply_product_split_to_boxes(page_image, boxes, plan)
     notes.extend(split_notes)
     if any(n.startswith("product_split:row=") for n in split_notes):
         notes.append("boundary_source:product_row_ocr")
-        return split_boxes, notes
-    out, bound_notes = enforce_material_main_boundary(
-        boxes, page_w=page_w, page_h=page_h, plan=plan, gap=2, min_main_height=max(80, page_h // 12)
+        cur = split_boxes
+    else:
+        cur, bound_notes = enforce_material_main_boundary(
+            boxes, page_w=page_w, page_h=page_h, plan=plan, gap=2, min_main_height=max(80, page_h // 12)
+        )
+        notes.extend(bound_notes)
+        notes.append("boundary_source:geometry_fallback")
+
+    cfg = config or {}
+    tb = ((cfg.get("perception") or {}).get("title_block_tables") or {})
+    aux_enabled = bool(tb.get("aux_split_enabled", True))
+    cur, aux_notes = separate_aux_tables(
+        page_image,
+        cur,
+        plan,
+        page_w=page_w,
+        page_h=page_h,
+        search_up_pad=int(tb.get("search_up_pad", 80)),
+        ink_threshold=int(tb.get("ink_threshold", 245)),
+        enabled=aux_enabled,
     )
-    notes.extend(bound_notes)
-    notes.append("boundary_source:geometry_fallback")
-    return out, notes
+    notes.extend(aux_notes)
+    cur, enf_notes = enforce_aux_above_material(cur, plan, gap=2)
+    notes.extend(enf_notes)
+    return cur, notes
 
 
 def _use_ocr_above_cells(ent: dict[str, Any]) -> bool:
     return _is_table_entity(ent) and str(ent.get("read_mode") or "").lower() == "above_cells"
+
+
+def _is_bbox_only_table(ent: dict[str, Any] | None, box_inst: dict[str, Any] | None = None) -> bool:
+    """附属表等：只保留整表框，不做字段识读。"""
+    if ent:
+        if str(ent.get("read_mode") or "").lower() == "bbox_only":
+            return True
+        if str(ent.get("section") or "").lower() == "aux":
+            return True
+        eid = str(ent.get("entity_id") or "")
+        if eid == "aux_table" or eid.startswith("aux_table"):
+            return True
+    if box_inst:
+        eid = str(box_inst.get("entity_id") or "")
+        if eid == "aux_table" or eid.startswith("aux_table"):
+            return True
+        fields = box_inst.get("fields") if isinstance(box_inst.get("fields"), dict) else {}
+        if str(fields.get("read_mode") or "").lower() == "bbox_only":
+            return True
+        if str(fields.get("section") or "").lower() == "aux":
+            return True
+    return False
+
+
+def _bbox_only_fields(ent: dict[str, Any] | None, box_inst: dict[str, Any] | None = None) -> dict[str, Any]:
+    section = "aux"
+    if ent and ent.get("section"):
+        section = str(ent.get("section"))
+    elif box_inst:
+        fields = box_inst.get("fields") if isinstance(box_inst.get("fields"), dict) else {}
+        section = str(fields.get("section") or "aux")
+    return {"section": section, "read_mode": "bbox_only", "pairs": []}
 
 
 def _coerce_instance_list(
@@ -576,7 +631,9 @@ def _build_plan_prompt(plan: list[dict[str, Any]], *, locate_only: bool = False)
             "你是工程图纸质检感知模块。本轮只做定位，不要填写字段内容。",
             "对于表格类实体：每种表格各输出一个整表 bbox，不要拆成单元格；"
             "material_table 与 main_table 必须分开定位，禁止合成一个大框。"
-            "分界参考：标题栏 Product 行以上为 material_table；Product 行及以下为 main_table。",
+            "若物料表上方还有其它独立表格，输出为 aux_table（可多张），禁止并入 material_table。"
+            "分界参考：标题栏 Product 行以上为 material_table；Product 行及以下为 main_table；"
+            "再往上的其它表为 aux_table。",
             "只输出一个简短 JSON 数组，不要 markdown 代码块，不要解释。",
             '每个元素格式: {"bbox_2d":[x1,y1,x2,y2],"label":"...","entity_id":"...","fields":{}}',
             "bbox_2d 使用 0-1000 归一化坐标。fields 必须为 {}。",
@@ -594,8 +651,10 @@ def _build_plan_prompt(plan: list[dict[str, Any]], *, locate_only: bool = False)
             "若存在相互压盖、交叉、重叠的数字，也必须分别给出各自的 bbox。",
             "对于表格类实体：每种表格各输出一个整表 bbox，不要拆成单元格；"
             "material_table 与 main_table 必须分开定位，禁止合成一个大框。"
+            "若物料表上方还有其它独立表格，输出为 aux_table（可多张），禁止并入 material_table。"
             "分界：以标题栏中 Product 字段所在行为界——"
-            "Product 行以上为 material_table；Product 行及其以下为 main_table。",
+            "Product 行以上为 material_table；Product 行及其以下为 main_table；"
+            "再往上的其它表为 aux_table（aux 只需 bbox，fields 可为 {}）。",
             "只输出 JSON 数组，不要解释。每个元素格式:",
             '{"bbox_2d":[x1,y1,x2,y2],"label":"...","entity_id":"...","fields":{...},"raw_text":"..."}',
             "bbox_2d 使用 0-1000 归一化坐标。",
@@ -1103,7 +1162,7 @@ def perceive_qwen_vl(
             boxes = _normalize_instances(list(raw1), plan, width, height, coord_norm)
 
         boxes, bound_notes = refine_material_main_boxes(
-            image, boxes, page_w=width, page_h=height, plan=plan
+            image, boxes, page_w=width, page_h=height, plan=plan, config=cfg
         )
         notes.extend(bound_notes)
         # Pass2 前剔除表格框内的尺寸定位，避免对标题栏数字做属性识读
@@ -1133,6 +1192,17 @@ def perceive_qwen_vl(
         for box_inst in boxes:
             eid = box_inst["entity_id"]
             ent = next((e for e in plan if e["entity_id"] == eid), None)
+            if ent is None and str(eid).startswith("aux_table"):
+                ent = next((e for e in plan if e.get("entity_id") == "aux_table"), None)
+
+            # 附属表等 bbox_only：跳过字段识读
+            if _is_bbox_only_table(ent, box_inst):
+                out_inst = {k: v for k, v in box_inst.items() if not str(k).startswith("_")}
+                out_inst["fields"] = _bbox_only_fields(ent, box_inst)
+                out_inst["parse_kind"] = "table"
+                instances.append(out_inst)
+                continue
+
             if not ent:
                 instances.append({k: v for k, v in box_inst.items() if not str(k).startswith("_")})
                 continue
@@ -1285,13 +1355,20 @@ def perceive_qwen_vl(
     raw = _coerce_instance_list(raw, notes=notes, tag="single_pass")
     instances = _normalize_instances(list(raw), plan, width, height, coord_norm)
     instances, bound_notes = refine_material_main_boxes(
-        image, instances, page_w=width, page_h=height, plan=plan
+        image, instances, page_w=width, page_h=height, plan=plan, config=cfg
     )
     notes.extend(bound_notes)
-    # single-pass：物料表字段改走 OCR above_cells（覆盖 VL 可能误填的 fields）
+    # single-pass：附属表 bbox_only；物料表字段改走 OCR above_cells
     for i, inst in enumerate(instances):
         eid = inst.get("entity_id")
         ent = next((e for e in plan if e["entity_id"] == eid), None)
+        if ent is None and str(eid).startswith("aux_table"):
+            ent = next((e for e in plan if e.get("entity_id") == "aux_table"), None)
+        if _is_bbox_only_table(ent, inst):
+            inst["fields"] = _bbox_only_fields(ent, inst)
+            inst["parse_kind"] = "table"
+            instances[i] = inst
+            continue
         if not ent or not _use_ocr_above_cells(ent) or not inst.get("bbox"):
             continue
         try:

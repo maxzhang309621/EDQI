@@ -79,7 +79,7 @@ def test_dimension_marks_in_drawing_parse_plan():
     ocr, vl = split_plan_for_backends(plan)
     # backend=vlm：尺寸属性进 VL，不再进重叠 OCR
     assert not any(e.get("parse_kind") == "dimension_marks" for e in ocr)
-    assert {e["entity_id"] for e in vl} == {"material_table", "main_table", "number_mark"}
+    assert {e["entity_id"] for e in vl} == {"aux_table", "material_table", "main_table", "number_mark"}
     assert any(e.get("parse_kind") == "dimension_marks" for e in vl)
 
 
@@ -117,7 +117,7 @@ def test_tables_only_keeps_dimension_marks_from_drawing_parse():
     plan = build_drawing_parse_plan(cfg)
     ocr, vl = split_plan_for_backends(plan)
     assert not ocr
-    assert {e["entity_id"] for e in vl} == {"material_table", "main_table", "number_mark"}
+    assert {e["entity_id"] for e in vl} == {"aux_table", "material_table", "main_table", "number_mark"}
     assert any(e.get("parse_kind") == "dimension_marks" for e in vl)
 
 

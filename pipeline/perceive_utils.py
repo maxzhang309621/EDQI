@@ -203,6 +203,8 @@ class PerceptionCache:
             "ocr_enhance": ent.get("ocr_enhance") or {},
             # 部件分区配置变更时失效旧网格分块缓存
             "_perception_view_regions": ent.get("_perception_view_regions"),
+            # 标题栏附属表分离配置变更时失效缓存
+            "_perception_title_block_tables": ent.get("_perception_title_block_tables"),
             # 尺寸多尺度/小字放大配置变更时失效缓存
             "_perception_dim_vlm": ent.get("_perception_dim_vlm"),
             # OBB / 准确率过滤变更时失效缓存
@@ -363,6 +365,15 @@ def _view_regions_cache_fp(vr_cfg: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _title_block_tables_cache_fp(tb_cfg: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "v": 1,
+        "aux_split_enabled": bool(tb_cfg.get("aux_split_enabled", True)),
+        "search_up_pad": int(tb_cfg.get("search_up_pad", 80)),
+        "ink_threshold": int(tb_cfg.get("ink_threshold", 245)),
+    }
+
+
 def _run_perceive_on_regions(
     *,
     image: Any,
@@ -505,10 +516,14 @@ def perceive_with_cache_and_tiles(
 
     # ---- 表格：同批感知，保证硬分界可见两框 ----
     if table_plan:
+        tb_cfg = (config.get("perception") or {}).get("title_block_tables") or {}
+        tb_fp = _title_block_tables_cache_fp(tb_cfg)
         cached_parts: list[list[dict[str, Any]]] = []
         all_hit = True
         for ent in table_plan:
-            hit = cache.get(backend_name, img_sig, ent)
+            cache_ent = dict(ent)
+            cache_ent["_perception_title_block_tables"] = tb_fp
+            hit = cache.get(backend_name, img_sig, cache_ent)
             if hit is None:
                 all_hit = False
                 break
@@ -527,10 +542,44 @@ def perceive_with_cache_and_tiles(
             if isinstance(payload.get("timing"), dict):
                 timing_acc = dict(payload["timing"])
             notes.append(f"tables_batch:{[e.get('entity_id') for e in table_plan]}")
+            claimed: set[int] = set()
             for ent in table_plan:
-                subset = [c for c in collected if c.get("entity_id") == ent["entity_id"]]
-                all_instances.extend(_finalize_entity(ent, subset))
-
+                cache_ent = dict(ent)
+                cache_ent["_perception_title_block_tables"] = tb_fp
+                eid = str(ent.get("entity_id") or "")
+                subset: list[dict[str, Any]] = []
+                for i, c in enumerate(collected):
+                    if i in claimed:
+                        continue
+                    ceid = str(c.get("entity_id") or "")
+                    if eid == "aux_table":
+                        match = ceid == "aux_table" or ceid.startswith("aux_table")
+                    else:
+                        match = ceid == eid
+                    if match:
+                        claimed.add(i)
+                        subset.append(c)
+                # aux：保留各实例自身 entity_id / instance_id，避免多表塌成一个 id
+                if eid == "aux_table":
+                    fixed = []
+                    for c in subset:
+                        item = dict(c)
+                        if not item.get("label"):
+                            item["label"] = ent.get("locate_query", eid)
+                        fields = item.get("fields") if isinstance(item.get("fields"), dict) else {}
+                        fields = dict(fields)
+                        fields.setdefault("section", "aux")
+                        fields.setdefault("read_mode", "bbox_only")
+                        fields.setdefault("pairs", [])
+                        item["fields"] = fields
+                        item["parse_kind"] = "table"
+                        fixed.append(item)
+                    cache.set(backend_name, img_sig, cache_ent, fixed)
+                    all_instances.extend(fixed)
+                else:
+                    all_instances.extend(
+                        _finalize_entity(ent, subset, cache_ent=cache_ent)
+                    )
     # ---- 其它实体：尺寸走视图分区；其余仍按网格/整图 ----
     for ent in other_plan:
         cache_ent = dict(ent)
