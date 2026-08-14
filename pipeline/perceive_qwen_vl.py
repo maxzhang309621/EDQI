@@ -1106,6 +1106,23 @@ def perceive_qwen_vl(
             boxes, plan=plan, page_w=width, page_h=height, notes=notes
         )
 
+        # 尺寸：AABB → OBB，减小倾斜大框对邻字的干扰
+        if has_dims:
+            from pipeline.oriented_box import apply_obb_to_instances
+
+            obb_cfg = (cfg.get("perception") or {}).get("dimension_obb") or {}
+            if bool(obb_cfg.get("enabled", True)):
+                before = len(boxes)
+                boxes = apply_obb_to_instances(
+                    image,
+                    boxes,
+                    entity_ids=_dimension_entity_ids(plan) or {"number_mark"},
+                    ink_threshold=int(obb_cfg.get("ink_threshold", 245)),
+                    pad=int(obb_cfg.get("pad", 2)),
+                )
+                n_quad = sum(1 for b in boxes if b.get("quad"))
+                notes.append(f"dim_obb_refine:n={n_quad}/{before}")
+
         instances = []
         pass2_min_side = int(scale_cfg.get("pass2_min_side", 128)) if dim_scale_on else 64
         for box_inst in boxes:
@@ -1155,6 +1172,19 @@ def perceive_qwen_vl(
                 y1_floor=int(y1_floor) if y1_floor is not None else None,
             )
             crop = image.crop(tuple(crop_box))
+            # 倾斜框：透视拉正，减少邻字进入 Pass2
+            if _is_dimension_marks_entity(ent) and box_inst.get("quad"):
+                try:
+                    from pipeline.oriented_box import warp_quad_crop
+
+                    crop = warp_quad_crop(
+                        image,
+                        box_inst["quad"],
+                        pad=int(((cfg.get("perception") or {}).get("dimension_obb") or {}).get("warp_pad", 4)),
+                        out_height=max(pass2_min_side, 48),
+                    )
+                except Exception as exc:
+                    notes.append(f"dim_obb_warp_fail:{type(exc).__name__}")
             tok = int(ent.get("max_new_tokens") or max_tokens)
             if _is_table_entity(ent):
                 field_prompt = _table_pass2_prompt(ent)
@@ -1211,6 +1241,23 @@ def perceive_qwen_vl(
         instances = _filter_dimension_marks_in_table_regions(
             instances, plan=plan, page_w=width, page_h=height, notes=notes
         )
+        if has_dims:
+            from pipeline.perceive_utils import filter_dimension_accuracy, nms_instances
+
+            acc_cfg = (cfg.get("perception") or {}).get("dimension_accuracy") or {}
+            instances, acc_notes = filter_dimension_accuracy(
+                instances,
+                drop_weak=bool(acc_cfg.get("drop_weak", True)),
+                dedupe_same_text=bool(acc_cfg.get("dedupe_same_text", True)),
+                center_dist_thr=float(acc_cfg.get("center_dist_thr", 28.0)),
+            )
+            notes.extend(acc_notes)
+            instances = nms_instances(
+                instances,
+                float((cfg.get("perception") or {}).get("nms_iou", 0.5)),
+                prefer_smaller=True,
+                use_quad=bool(((cfg.get("perception") or {}).get("dimension_obb") or {}).get("enabled", True)),
+            )
         timing = _snapshot_vlm_timing(wall_s=time.perf_counter() - wall_t0)
         print(
             f"[timing] qwen_vl wall={timing['wall_s']:.2f}s "

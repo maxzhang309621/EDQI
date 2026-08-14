@@ -50,6 +50,17 @@ perception:
     multi_scale: true
     # Pass2 局部裁剪短边至少这么大
     pass2_min_side: 128
+  # 倾斜框：AABB 墨迹 → minAreaRect OBB（quad）+ Pass2 仿射拉正
+  dimension_obb:
+    enabled: true
+    ink_threshold: 245
+    pad: 2
+    warp_pad: 4
+  # 准确率：弱结果剔除 + 同文近距去重（在 Skew-NMS 之后）
+  dimension_accuracy:
+    drop_weak: true
+    dedupe_same_text: true
+    center_dist_thr: 28.0
   number_overlap:
     confidence_threshold: 0.35
     tile_enabled: false

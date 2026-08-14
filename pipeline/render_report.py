@@ -293,6 +293,7 @@ def _attribute_rows_from_facts(facts: dict[str, Any] | None) -> list[dict[str, A
             {
                 **(fields or {}),
                 "bbox": inst.get("bbox"),
+                "quad": inst.get("quad"),
                 "raw_text": inst.get("raw_text"),
                 "instance_id": inst.get("instance_id"),
                 "label": inst.get("label"),
@@ -369,7 +370,19 @@ def _draw_attribute_boxes(
         if x2 <= x1 or y2 <= y1:
             continue
         color = _attribute_box_color(row, colors)
-        draw.rectangle([x1, y1, x2, y2], outline=color, width=width)
+        quad = row.get("quad")
+        if (
+            isinstance(quad, list)
+            and len(quad) >= 4
+            and all(isinstance(p, (list, tuple)) and len(p) >= 2 for p in quad[:4])
+        ):
+            pts = [(int(round(float(p[0]))), int(round(float(p[1])))) for p in quad[:4]]
+            draw.polygon(pts, outline=color, width=width)
+            lx0 = min(p[0] for p in pts)
+            ly0 = min(p[1] for p in pts)
+        else:
+            draw.rectangle([x1, y1, x2, y2], outline=color, width=width)
+            lx0, ly0 = x1, y1
         if row.get("keep_pair") or row.get("dimension_parse_skipped"):
             n_overlap += 1
         else:
@@ -378,10 +391,9 @@ def _draw_attribute_boxes(
             label = _format_attribute_label(row)
             tb = draw.textbbox((0, 0), label, font=font)
             tw, th = tb[2] - tb[0], tb[3] - tb[1]
-            lx, ly = x1, max(0, y1 - th - 4)
+            lx, ly = lx0, max(0, ly0 - th - 4)
             draw.rectangle([lx, ly, lx + tw + 4, ly + th + 2], fill=(255, 255, 255))
             draw.text((lx + 2, ly), label, fill=color, font=font)
-
     legend: list[tuple[tuple[int, int, int], list[str]]] = []
     if n_ok:
         c = tuple(colors.get("attribute", [14, 165, 233]))

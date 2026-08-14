@@ -30,35 +30,132 @@ def nms_instances(
     iou_thr: float = 0.5,
     *,
     prefer_smaller: bool = False,
+    use_quad: bool = False,
 ) -> list[dict[str, Any]]:
-    """同类 entity 按 confidence NMS；prefer_smaller 时同 IoU 优先保留更小框。"""
+    """同类 entity NMS；use_quad 时对倾斜框用旋转 IoU（Skew-NMS）。"""
     by_eid: dict[str, list[dict[str, Any]]] = {}
     for inst in instances:
         by_eid.setdefault(inst.get("entity_id", "unknown"), []).append(inst)
     kept: list[dict[str, Any]] = []
+
+    def _area_of(x: dict[str, Any]) -> float:
+        if use_quad and x.get("quad"):
+            try:
+                import cv2
+                import numpy as np
+
+                pts = np.asarray(x["quad"], dtype=np.float32).reshape(-1, 2)
+                return float(abs(cv2.contourArea(pts)))
+            except Exception:
+                pass
+        bbox = x.get("bbox") or [0, 0, 0, 0]
+        if len(bbox) != 4:
+            return 0.0
+        return max(0.0, float(bbox[2]) - float(bbox[0])) * max(
+            0.0, float(bbox[3]) - float(bbox[1])
+        )
+
+    def _iou(a: dict[str, Any], b: dict[str, Any]) -> float:
+        if use_quad and a.get("quad") and b.get("quad"):
+            from pipeline.oriented_box import iou_quad
+
+            return float(iou_quad(a["quad"], b["quad"]))
+        if a.get("bbox") and b.get("bbox"):
+            return float(iou_xyxy(a["bbox"], b["bbox"]))
+        return 0.0
+
     for group in by_eid.values():
         def _sort_key(x: dict[str, Any]) -> tuple:
             conf = float(x.get("confidence") or 0)
-            bbox = x.get("bbox") or [0, 0, 0, 0]
-            area = 0.0
-            if len(bbox) == 4:
-                area = max(0.0, float(bbox[2]) - float(bbox[0])) * max(
-                    0.0, float(bbox[3]) - float(bbox[1])
-                )
-            # prefer_smaller: 高置信优先，同置信下面积更小优先
+            area = _area_of(x)
             return (-conf, area if prefer_smaller else -area)
 
         group = sorted(group, key=_sort_key)
         selected: list[dict[str, Any]] = []
         for cand in group:
-            if all(
-                iou_xyxy(cand["bbox"], s["bbox"]) < iou_thr
-                for s in selected
-                if s.get("bbox") and cand.get("bbox")
-            ):
+            if all(_iou(cand, s) < iou_thr for s in selected):
                 selected.append(cand)
         kept.extend(selected)
     return kept
+
+
+def filter_dimension_accuracy(
+    instances: list[dict[str, Any]],
+    *,
+    drop_weak: bool = True,
+    dedupe_same_text: bool = True,
+    center_dist_thr: float = 28.0,
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """尺寸准确率后处理：弱结果剔除 + 同文近距去重。"""
+    notes: list[str] = []
+    kept: list[dict[str, Any]] = []
+    n_weak = 0
+    for inst in instances or []:
+        item = dict(inst)
+        if str(item.get("entity_id") or "") != "number_mark":
+            kept.append(item)
+            continue
+        fields = item.get("fields") if isinstance(item.get("fields"), dict) else {}
+        text = str(fields.get("text") or item.get("raw_text") or "").strip()
+        weak = False
+        if drop_weak:
+            if not text:
+                weak = True
+            elif not any(ch.isdigit() for ch in text) and fields.get("dim_kind") in (None, ""):
+                weak = True
+        if weak:
+            n_weak += 1
+            continue
+        kept.append(item)
+    if n_weak:
+        notes.append(f"dim_accuracy_drop_weak={n_weak}")
+
+    if not dedupe_same_text:
+        return kept, notes
+
+    def _center(b: list[Any]) -> tuple[float, float]:
+        return ((float(b[0]) + float(b[2])) / 2.0, (float(b[1]) + float(b[3])) / 2.0)
+
+    def _norm_text(t: str) -> str:
+        return "".join(ch for ch in t.lower() if ch.isalnum() or ch in "±.+-°ø⌀φ")
+
+    out: list[dict[str, Any]] = []
+    n_dup = 0
+    for inst in kept:
+        if str(inst.get("entity_id") or "") != "number_mark":
+            out.append(inst)
+            continue
+        fields = inst.get("fields") if isinstance(inst.get("fields"), dict) else {}
+        text = _norm_text(str(fields.get("text") or inst.get("raw_text") or ""))
+        bb = inst.get("bbox") or []
+        if not text or len(bb) != 4:
+            out.append(inst)
+            continue
+        cx, cy = _center(bb)
+        dup = False
+        for prev in out:
+            if str(prev.get("entity_id") or "") != "number_mark":
+                continue
+            pf = prev.get("fields") if isinstance(prev.get("fields"), dict) else {}
+            pt = _norm_text(str(pf.get("text") or prev.get("raw_text") or ""))
+            if pt != text:
+                continue
+            pb = prev.get("bbox") or []
+            if len(pb) != 4:
+                continue
+            px, py = _center(pb)
+            if (cx - px) ** 2 + (cy - py) ** 2 <= float(center_dist_thr) ** 2:
+                # 同 parent 或都无 parent 才去重
+                if (inst.get("parent_id") or None) == (prev.get("parent_id") or None):
+                    dup = True
+                    break
+        if dup:
+            n_dup += 1
+            continue
+        out.append(inst)
+    if n_dup:
+        notes.append(f"dim_accuracy_dedupe_text={n_dup}")
+    return out, notes
 
 
 class PerceptionCache:
@@ -108,6 +205,9 @@ class PerceptionCache:
             "_perception_view_regions": ent.get("_perception_view_regions"),
             # 尺寸多尺度/小字放大配置变更时失效缓存
             "_perception_dim_vlm": ent.get("_perception_dim_vlm"),
+            # OBB / 准确率过滤变更时失效缓存
+            "_perception_dim_obb": ent.get("_perception_dim_obb"),
+            "_perception_dim_accuracy": ent.get("_perception_dim_accuracy"),
         }
         return hashlib.sha1(json.dumps(payload, ensure_ascii=False, sort_keys=True).encode()).hexdigest()[:16]
 
@@ -176,6 +276,11 @@ def shift_instances(instances: list[dict[str, Any]], ox: int, oy: int) -> list[d
         bbox = list(inst.get("bbox") or [0, 0, 0, 0])
         if len(bbox) == 4:
             item["bbox"] = [bbox[0] + ox, bbox[1] + oy, bbox[2] + ox, bbox[3] + oy]
+        quad = inst.get("quad")
+        if isinstance(quad, list) and quad:
+            item["quad"] = [
+                [float(p[0]) + ox, float(p[1]) + oy] for p in quad if isinstance(p, (list, tuple)) and len(p) >= 2
+            ]
         out.append(item)
     return out
 
@@ -361,6 +466,8 @@ def perceive_with_cache_and_tiles(
         cache_ent: dict[str, Any] | None = None,
         drop_oversized: bool = False,
         prefer_smaller: bool = False,
+        use_quad: bool = False,
+        apply_accuracy: bool = False,
     ) -> list[dict[str, Any]]:
         if drop_oversized:
             collected = _drop_oversized_dimension_boxes(
@@ -369,7 +476,21 @@ def perceive_with_cache_and_tiles(
                 page_h=height,
                 max_area_frac=float(vr_cfg.get("max_area_frac", 0.35)),
             )
-        collected = nms_instances(collected, nms_thr, prefer_smaller=prefer_smaller)
+        if apply_accuracy:
+            acc_cfg = (config.get("perception") or {}).get("dimension_accuracy") or {}
+            collected, acc_notes = filter_dimension_accuracy(
+                collected,
+                drop_weak=bool(acc_cfg.get("drop_weak", True)),
+                dedupe_same_text=bool(acc_cfg.get("dedupe_same_text", True)),
+                center_dist_thr=float(acc_cfg.get("center_dist_thr", 28.0)),
+            )
+            notes.extend(acc_notes)
+        collected = nms_instances(
+            collected,
+            nms_thr,
+            prefer_smaller=prefer_smaller,
+            use_quad=use_quad,
+        )
         fixed = []
         for c in collected or []:
             item = dict(c)
@@ -424,6 +545,21 @@ def perceive_with_cache_and_tiles(
                 "locate_max_side": int(dcfg.get("locate_max_side", 2560)),
                 "multi_scale": bool(dcfg.get("multi_scale", True)),
                 "pass2_min_side": int(dcfg.get("pass2_min_side", 128)),
+            }
+            obb_cfg = (config.get("perception") or {}).get("dimension_obb") or {}
+            cache_ent["_perception_dim_obb"] = {
+                "v": 1,
+                "enabled": bool(obb_cfg.get("enabled", True)),
+                "ink_threshold": int(obb_cfg.get("ink_threshold", 245)),
+                "pad": int(obb_cfg.get("pad", 2)),
+                "warp_pad": int(obb_cfg.get("warp_pad", 4)),
+            }
+            acc_cfg = (config.get("perception") or {}).get("dimension_accuracy") or {}
+            cache_ent["_perception_dim_accuracy"] = {
+                "v": 1,
+                "drop_weak": bool(acc_cfg.get("drop_weak", True)),
+                "dedupe_same_text": bool(acc_cfg.get("dedupe_same_text", True)),
+                "center_dist_thr": float(acc_cfg.get("center_dist_thr", 28.0)),
             }
         cached = cache.get(backend_name, img_sig, cache_ent)
         if cached is not None:
@@ -523,12 +659,17 @@ def perceive_with_cache_and_tiles(
 
             notes.append(f"view_tiled:{ent['entity_id']}:{n_part_regions}")
             drop_os = bool(vr_cfg.get("drop_oversized_dims", False))
+            use_obb = bool(
+                ((config.get("perception") or {}).get("dimension_obb") or {}).get("enabled", True)
+            )
             dim_fixed = _finalize_entity(
                 ent,
                 collected,
                 cache_ent=cache_ent,
                 drop_oversized=drop_os,
                 prefer_smaller=True,
+                use_quad=use_obb,
+                apply_accuracy=True,
             )
             bundled = list(dim_fixed) + component_insts
             cache.set(backend_name, img_sig, cache_ent, bundled)
@@ -560,6 +701,9 @@ def perceive_with_cache_and_tiles(
                 timing_acc = t_acc
             notes.append(f"tiled:{ent['entity_id']}:{len(tiles)}")
 
+        use_obb = is_dim and bool(
+            ((config.get("perception") or {}).get("dimension_obb") or {}).get("enabled", True)
+        )
         all_instances.extend(
             _finalize_entity(
                 ent,
@@ -567,6 +711,8 @@ def perceive_with_cache_and_tiles(
                 cache_ent=cache_ent,
                 drop_oversized=False,
                 prefer_smaller=is_dim,
+                use_quad=use_obb,
+                apply_accuracy=is_dim,
             )
         )
 

@@ -1,79 +1,67 @@
-# 架构方案：EDQI 部件分区 VLM 属性识别
+# 架构方案：尺寸检测准确率 + 倾斜框
 
-- 版本：v1.0（回填自已批准方案「部件分区属性架构」）
-- 日期：2026-08-13
-- 用户确认：是（Cursor plan 批准 + 「按本地 skill 全流程做补充」）
+- 版本：v2.0
+- 日期：2026-08-14
+- 用户确认：是（指令：依照本地开发 skill **完成此任务开发**）
+- 前序：v1.0 部件分区 VLM 属性识别
 
 ## 需求概述
 
-- **核心目标**：关闭数字重叠 OCR 路径；将 VLM 尺寸属性识别改为「先定位带标签部件/视图 → 按部件外扩区识别属性 → 属性经 parent_id 关联部件」；结果图可视化部件原始框与扩展框以便调试。
-- **输入**：工程图页图（ingest 后 RGB）、drawing_parse 计划（含 `number_mark` / 表格）、配置 `perception.view_regions`。
-- **输出**：
-  - `component` 实例 → `facts.components`（label、bbox、bbox_expanded）
-  - `number_mark` 实例 → `facts.annotations`（含 `parent_id`）
-  - 可视化：部件黄/红框 + 属性框 + 表格框
-- **约束**：
-  - 不改 `perceive_number_overlap` 墨迹判定超参
-  - 不重写表格 VLM batch
-  - 技术栈保持现有 Python + Qwen3-VL + PIL 管线
-  - 0 个部件时回退网格分块保底
+- **核心目标**
+  1. 在已能检出大量尺寸目标的前提下，**提高检测/识读准确率**（降假阳、降重复、提字段正确率）。
+  2. 倾斜尺寸若用轴对齐大框，易吞并邻字；引入**倾斜矩形（OBB）**表示，减小邻域干扰，Pass2 按朝向裁剪识读。
+- **输入**：现有 VLM Pass1 轴对齐框 + 页图；配置 `perception.dimension_vlm` / `dimension_obb`。
+- **输出**：实例含 `bbox`（外接 AABB，兼容旧路径）、`quad`（四点倾斜框）、`angle`；可视化画倾斜多边形；NMS 对倾斜框用旋转 IoU。
+- **约束**：不改数字重叠 OCR 超参；不大改表格路径；技术栈保持 Python + Qwen3-VL + Pillow（可选 OpenCV 几何）。
 
 ## 可行性结论
 
 **可行**
 
-- 技术成熟度：现有 Pass1/Pass2 尺寸 VLM、表格 batch、facts/render 均可复用；仅增加 Pass0 定位与几何分区。
-- 数据可得性：无需新数据集；用现有图纸调试即可。
-- 资源约束：多一次轻量 VLM 定位调用 + 按部件多次 crop 识别，显存与耗时可接受；可用 `locate_max_new_tokens` 控制。
+- 倾斜框：场景文字检测（RRPN / R2CNN）已验证「倾斜框 + 倾斜 NMS」优于 AABB；本仓库可在 VLM AABB 后用墨迹最小外接旋转矩形精修，无需另训检测器。
+- 准确率：多尺度/分块导致重复框，可用「更小框优先 NMS + 文本去重 + 弱结果剔除」；Pass2 用旋转裁剪减少邻字污染。
 
 ## 模块划分
 
 | 模块 | 职责 | 所需算法/逻辑/架构类型 |
 |------|------|------------------------|
-| 重叠路径开关 | 关闭双后端/自动重叠 OCR，规则置 draft | 配置与规则生命周期管理 |
-| Pass0 部件定位 | 整页框出几何视图并赋短 label | 视觉语言模型定位（检测式输出） |
-| 识别区几何 | 外扩、扣表、过小丢弃、过大拆分、空结果回退网格 | 轴对齐框几何 / 启发式区域规划 |
-| 分区属性识别 | 各区 crop 后跑既有 dimension Pass1/Pass2 | 既有 VLM 两阶段抽取 |
-| 关联与 Facts | component 实例 + annotation.parent_id | 对象图关联（父子引用） |
-| 可视化 | 画原始/扩展部件框与属性框 | 2D 标注渲染 |
+| OBB 精修 | AABB→墨迹→最小面积旋转矩形→quad | 连通域/二值化 + 旋转最小外接矩形 |
+| 旋转 IoU / NMS | 倾斜框去重，避免 AABB 高 IoU 误杀邻字 | 多边形裁剪 IoU / Skew-NMS |
+| 旋转裁剪 Pass2 | 按 OBB 仿射拉正后识读 | 仿射变换 + 既有 VLM Pass2 |
+| 准确率后处理 | 重复合并、假阳抑制、字段一致性 | 规则启发式去重 + 弱结果过滤 |
+| 可视化 | 画 quad 多边形 | 2D 多边形描边 |
 
 ## 数据流与接口约定
 
 ```
-page → tables_batch（既有）
-     → Pass0 locate_drawing_views → [{bbox, label}, ...]
-     → resolve_part_region_specs → [{part_id, label, bbox_raw, bbox_expanded, regions[]}]
-     → 每 region: perceive_qwen_vl([number_mark]) → shift → parent_id=part_id
-     → component 实例 + number_mark 实例 → build_facts → render_report
+Pass1 AABB boxes
+  → refine_dim_obb(image, box) → {bbox_aabb, quad[4][2], angle}
+  → nms_oriented (prefer_smaller)
+  → Pass2: warp_crop(quad) → VLM 识读
+  → accuracy_filter (弱结果/重复 text)
+  → facts.annotations (+quad) → render polygon
 ```
 
-关键接口：
+接口：
 
-| 接口 | 输入 | 输出 |
-|------|------|------|
-| `locate_drawing_views` | 整页 Image / 路径, config | `(views[{bbox,label}], notes)` |
-| `resolve_part_region_specs` | views, page_wh, table_bboxes, expand… | `(specs, source∈{view_regions,grid,full_page})` |
-| `perceive_with_cache_and_tiles`（尺寸分支） | plan 含 dimension_marks | instances含 component + number_mark(parent_id) |
-| `build_facts` | instances | `components[]`, `annotations[].parent_id`, `bbox_expanded` |
-| `render_report` | facts + show_view_regions | 标注图 |
-
-关联约定：`parent_id == component.instance_id`（形如 `component#i`）。
+| 字段 | 含义 |
+|------|------|
+| `bbox` | 轴对齐外接框 [x1,y1,x2,y2]（兼容） |
+| `quad` | 四点 [[x,y]×4]，顺时针 |
+| `angle` | 文本朝向角（度），与 Pass2 deskew 一致 |
 
 ## 开发步骤与验收标准
 
-| 步骤 | 描述 | 所需算法类型 | 验收标准（可测试） |
-|------|------|--------------|---------------------|
-| S1 | 关闭数字重叠识别 | 配置/规则状态 | `auto_number_overlap_backend=false`；`perception_dual_backend=false`；`NUM_TEXT_NO_OVERLAP.status=draft`；only_active 加载不含该规则 |
-| S2 | Pass0 部件定位 API | VLM 定位 | 权重就绪时返回带 bbox+label 的列表；近整页框被丢弃；notes 含 `view_locate_raw=` |
-| S3 | 识别区几何 | 框几何启发式 | 外扩后更大；中心在表内→丢弃；与表重叠可裁剪；空视图→grid/full_page |
-| S4 | 分区识别 + 关联 | VLM 抽取 + 父子引用 | 属性带 `parent_id`；存在对应 `component`；半页大框丢弃；notes 含 `view_regions:n=` / `view_regions_source=` |
-| S5 | 可视化 | 2D 渲染 | `show_view_regions=true` 时画出 raw+expanded；图例含 view raw/expanded |
-| S6 | 单测与回归 | 单元测试 | 相关 pytest 全部通过 |
+| 步骤 | 描述 | 所需算法类型 | 验收标准 |
+|------|------|--------------|----------|
+| A1 | OBB 精修纯函数 | 旋转最小外接矩形 | 倾斜墨迹条的 AABB 面积 > OBB 外接 AABB；quad 四点合法 |
+| A2 | 旋转 IoU + NMS | Skew-NMS | 两邻接斜条 AABB-IoU 高但 OBB-IoU 低时，二者均可保留 |
+| A3 | 旋转裁剪 Pass2 | 仿射拉正 | 裁剪图近水平；邻字少进入 crop |
+| A4 | 准确率过滤 | 启发式去重 | 同 text+高 IoU 合并；空/弱 fields 标记或丢弃可配 |
+| A5 | 渲染 + 配置 + 单测 | 工程集成 | show_attribute 画多边形；相关 pytest 通过 |
 
 ## 风险与外部依赖
 
-- Pass0 漏检/融框 → 依赖 `fallback_grid` 保底
-- 部件框切碎尺寸标注 → `expand_ratio`（默认 0.2）可调
-- 缓存未含 view_regions 指纹时会沿用旧结果 → plan_key 需纳入指纹
-- 无 active 规则时 `run()` 须允许仅 drawing_parse 计划
-- 依赖本地 Qwen3-VL 权重；未就绪时 Pass0 空列表并回退网格
+- VLM 仍可能给出偏大 AABB；OBB 依赖框内墨迹质量，框内多目标时可能融框——用 prefer_smaller + 连通域最大块缓解。
+- OpenCV 若未声明依赖，优先用已有传递依赖或纯 numpy 实现；否则写入 requirements。
+- 缓存指纹需纳入 OBB/准确率配置。

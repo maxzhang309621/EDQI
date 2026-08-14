@@ -90,6 +90,10 @@ def build_facts(
             obj["parent_id"] = inst.get("parent_id")
         if inst.get("bbox_expanded") is not None:
             obj["bbox_expanded"] = inst.get("bbox_expanded")
+        if inst.get("quad") is not None:
+            obj["quad"] = inst.get("quad")
+        if inst.get("angle") is not None and "angle" not in obj:
+            obj["angle"] = inst.get("angle")
         if "id" not in obj and fields.get("id"):
             obj["id"] = fields["id"]
 
